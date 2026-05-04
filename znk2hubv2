@@ -1,0 +1,2475 @@
+-- ============================================================
+-- ⚡ ZNK HUB — ULTIMATE EDITION ⚡
+-- Interface ZNK v19 | Key System ZNK
+-- Sauvegarde auto | ColorPicker | Keybind | Admin Panel
+-- ============================================================
+-- SYSTÈME DE SAUVEGARDE — IMPORTANT
+-- Pour que la sauvegarde fonctionne, vous DEVEZ avoir un
+-- dossier de sauvegarde accessible par votre exécuteur.
+-- Les fichiers seront créés automatiquement dans le dossier
+-- de travail de votre exécuteur (ex: workspace/ ou autoexec/).
+-- Si writefile/readfile ne sont pas disponibles, la sauvegarde
+-- sera désactivée mais le hub fonctionnera quand même.
+-- ============================================================
+
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local CoreGui          = game:GetService("CoreGui")
+local HttpService      = game:GetService("HttpService")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace        = game:GetService("Workspace")
+
+-- ============================================================
+-- FICHIERS & CONSTANTES
+-- ============================================================
+local VALID_KEYS       = {"ZNK-2024-ELITE","ZNK-AMI1-2024","ZNK-AMI2-2024","znkxvanouille"}
+local KEY_FILE         = "znk_key.txt"
+local ACCOUNTS_FILE    = "znk_accounts.json"
+local CUSTOM_KEYS_FILE = "znk_custom_keys.json"
+local SESSION_FILE     = "znk_session.json"
+local SETTINGS_FILE    = "znk_config.json"
+local WHITELIST_FILE   = "znk_whitelist.json"
+local STATES_FILE      = "znk_states.json"
+local ADMIN_CODE       = "ZNK-ADMIN-2024"
+
+local loginVerified      = false
+local loggedUsername     = ""
+local currentKeyRemaining= ""
+local currentSessionData = nil
+local ScreenGui          = nil
+local isMinimized        = false
+
+-- ============================================================
+-- UTILITAIRES FICHIER
+-- ============================================================
+local function safeRead(file)
+    if isfile and isfile(file) then
+        local ok, v = pcall(readfile, file)
+        return ok and v or nil
+    end
+    return nil
+end
+local function safeWrite(file, data) pcall(writefile, file, data) end
+local function safeDelete(file)
+    pcall(function()
+        if isfile and isfile(file) then delfile(file) end
+    end)
+end
+local function loadJSON(file)
+    local raw = safeRead(file)
+    if not raw then return {} end
+    local ok, data = pcall(HttpService.JSONDecode, HttpService, raw)
+    return (ok and data) or {}
+end
+local function saveJSON(file, data)
+    local ok, encoded = pcall(HttpService.JSONEncode, HttpService, data)
+    if ok then safeWrite(file, encoded) end
+end
+local function loadAccounts()    return loadJSON(ACCOUNTS_FILE) end
+local function saveAccounts(a)   saveJSON(ACCOUNTS_FILE, a) end
+local function loadCustomKeys()  return loadJSON(CUSTOM_KEYS_FILE) end
+local function saveCustomKeys(k) saveJSON(CUSTOM_KEYS_FILE, k) end
+local function loadSession()     return loadJSON(SESSION_FILE) end
+local function saveSession(s)    saveJSON(SESSION_FILE, s) end
+local function deleteSession()   safeDelete(SESSION_FILE) end
+local function loadWhitelist()   return loadJSON(WHITELIST_FILE) end
+local function saveWhitelist(w)  saveJSON(WHITELIST_FILE, w) end
+
+-- ============================================================
+-- WHITELIST
+-- ============================================================
+local function getLocalID()
+    local ok, id = pcall(function() return tostring(Players.LocalPlayer.UserId) end)
+    return ok and id or "unknown"
+end
+local function isWhitelisted(username)
+    local wl = loadWhitelist()
+    return wl[username:lower()] == getLocalID()
+end
+local function addToWhitelist(username)
+    local wl = loadWhitelist()
+    wl[username:lower()] = getLocalID()
+    saveWhitelist(wl)
+end
+local function removeFromWhitelist(username)
+    local wl = loadWhitelist()
+    wl[username:lower()] = nil
+    saveWhitelist(wl)
+end
+
+-- ============================================================
+-- TEMPS
+-- ============================================================
+local function formatTime(seconds)
+    if not seconds or seconds <= 0 then return "Expirée" end
+    local days  = math.floor(seconds / 86400)
+    local hours = math.floor((seconds % 86400) / 3600)
+    local mins  = math.floor((seconds % 3600) / 60)
+    local secs  = seconds % 60
+    if days  > 0 then return days.."j "..hours.."h" end
+    if hours > 0 then return hours.."h "..mins.."m" end
+    if mins  > 0 then return mins.."m "..secs.."s" end
+    return secs.."s"
+end
+local function getAccountKeyRemaining(accountData)
+    if not accountData then return "Aucune key" end
+    local duration    = tonumber(accountData.keyDuration)
+    local activatedAt = tonumber(accountData.keyActivatedAt) or 0
+    if not duration or duration >= 999999999 then return "Illimitée" end
+    local now = os.time and os.time() or 0
+    return formatTime(math.max((activatedAt + duration) - now, 0))
+end
+local function isKeyExpiredForAccount(accountData)
+    if not accountData then return true end
+    local duration    = tonumber(accountData.keyDuration)
+    local activatedAt = tonumber(accountData.keyActivatedAt) or 0
+    if not duration or duration >= 999999999 then return false end
+    return (os.time and os.time() or 0) >= (activatedAt + duration)
+end
+local function updateRemainingTimeDisplay()
+    if currentSessionData then
+        currentKeyRemaining = getAccountKeyRemaining(currentSessionData)
+    end
+end
+
+-- ============================================================
+-- KEYS
+-- ============================================================
+local function isKeyValid(key)
+    if not key or key == "" then return false end
+    for _, k in pairs(VALID_KEYS) do if key == k then return true end end
+    local customKeys = loadCustomKeys()
+    for _, entry in pairs(customKeys) do
+        if type(entry) == "string" then
+            if key == entry then return true end
+        elseif type(entry) == "table" and entry.key == key then
+            local duration  = tonumber(entry.duration)
+            local createdAt = tonumber(entry.createdAt) or 0
+            if not duration or duration >= 999999999 then return true end
+            if (os.time and os.time() or 0) <= (createdAt + duration) then return true end
+        end
+    end
+    return false
+end
+local function getCustomKeyMeta(targetKey)
+    for _, entry in pairs(loadCustomKeys()) do
+        if type(entry) == "table" and entry.key == targetKey then return entry end
+        if type(entry) == "string" and entry == targetKey then return {key=entry,duration=999999999,createdAt=0} end
+    end
+    return nil
+end
+
+-- ============================================================
+-- COMPTES
+-- ============================================================
+local function checkAccount(username, password)
+    local accounts = loadAccounts()
+    local user = username:lower()
+    if accounts[user] and accounts[user].password == password then
+        return true, accounts[user]
+    end
+    return false, nil
+end
+local function saveAccount(username, password, keyUsed)
+    local accounts = loadAccounts()
+    local lower = username:lower()
+    local now   = os.time and os.time() or 0
+    local meta  = getCustomKeyMeta(keyUsed)
+    accounts[lower] = {
+        password       = password,
+        keyUsed        = keyUsed or "",
+        createdAt      = accounts[lower] and accounts[lower].createdAt or now,
+        keyActivatedAt = now,
+        keyDuration    = meta and meta.duration or 999999999,
+    }
+    saveAccounts(accounts)
+    return accounts[lower]
+end
+local function accountExists(username)
+    return loadAccounts()[username:lower()] ~= nil
+end
+
+-- ============================================================
+-- NOTIFICATIONS
+-- ============================================================
+local activeNotifs = 0
+local notifColor   = Color3.fromRGB(185, 45, 255)
+
+local function notify(title, msg, duration)
+    local ng = Instance.new("ScreenGui")
+    ng.ResetOnSpawn = false
+    ng.DisplayOrder = 999999999
+    pcall(function()
+        if gethui then ng.Parent = gethui()
+        else ng.Parent = CoreGui end
+    end)
+    local N = Instance.new("Frame", ng)
+    N.Size = UDim2.new(0, 310, 0, 72)
+    N.Position = UDim2.new(1, 320, 0, 20 + activeNotifs * 82)
+    N.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+    N.BorderSizePixel = 0
+    Instance.new("UICorner", N).CornerRadius = UDim.new(0, 10)
+    local ns = Instance.new("UIStroke", N)
+    ns.Color = notifColor; ns.Thickness = 2
+    local ic = Instance.new("TextLabel", N)
+    ic.Size = UDim2.new(0, 40, 0, 40)
+    ic.Position = UDim2.new(0, 10, 0.5, -20)
+    ic.BackgroundTransparency = 1
+    ic.Text = "⚡"
+    ic.Font = Enum.Font.GothamBold; ic.TextSize = 26; ic.TextColor3 = notifColor
+    local tl = Instance.new("TextLabel", N)
+    tl.Size = UDim2.new(1, -60, 0, 22); tl.Position = UDim2.new(0, 55, 0, 12)
+    tl.BackgroundTransparency = 1; tl.Text = title
+    tl.Font = Enum.Font.GothamBold; tl.TextSize = 14; tl.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tl.TextXAlignment = Enum.TextXAlignment.Left
+    local ml = Instance.new("TextLabel", N)
+    ml.Size = UDim2.new(1, -60, 0, 28); ml.Position = UDim2.new(0, 55, 0, 36)
+    ml.BackgroundTransparency = 1; ml.Text = msg
+    ml.Font = Enum.Font.Gotham; ml.TextSize = 12; ml.TextColor3 = Color3.fromRGB(180, 175, 195)
+    ml.TextXAlignment = Enum.TextXAlignment.Left; ml.TextWrapped = true
+    activeNotifs = activeNotifs + 1
+    TweenService:Create(N, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Position = UDim2.new(1, -320, 0, 20 + (activeNotifs - 1) * 82)
+    }):Play()
+    task.delay(duration or 3, function()
+        TweenService:Create(N, TweenInfo.new(0.3), {
+            Position = UDim2.new(1, 320, 0, 20 + (activeNotifs - 1) * 82)
+        }):Play()
+        task.wait(0.4); activeNotifs = activeNotifs - 1; ng:Destroy()
+    end)
+end
+
+-- ============================================================
+-- DÉCONNEXION FORCÉE
+-- ============================================================
+local createLoginScreen
+local function forceDisconnect(reason)
+    deleteSession()
+    removeFromWhitelist(loggedUsername)
+    loginVerified      = false
+    loggedUsername     = ""
+    currentSessionData = nil
+    if ScreenGui and ScreenGui.Parent then ScreenGui:Destroy() end
+    notify("ZNK Hub", reason or "Acces révoqué. Déconnexion.", 3)
+    task.delay(1, function() createLoginScreen() end)
+end
+
+-- ============================================================
+-- WATCHER TIMER
+-- ============================================================
+local function startTimerWatcher()
+    task.spawn(function()
+        while loginVerified do
+            task.wait(5)
+            if currentSessionData and isKeyExpiredForAccount(currentSessionData) then
+                forceDisconnect("Votre key a expiré. Accès révoqué.")
+                return
+            end
+            if loggedUsername ~= "" then
+                local accounts = loadAccounts()
+                if not accounts[loggedUsername:lower()] then
+                    forceDisconnect("Votre compte a été supprimé par l'admin.")
+                    return
+                end
+            end
+        end
+    end)
+end
+
+-- ============================================================
+-- ADMIN PANEL
+-- ============================================================
+local adminPanelGui      = nil
+local adminAuthenticated = false
+
+local function openAdminPanel()
+    if adminPanelGui and adminPanelGui.Parent then
+        adminPanelGui:Destroy(); adminPanelGui = nil; return
+    end
+    local APGui = Instance.new("ScreenGui")
+    APGui.Name = "ZNKAdminPanel"; APGui.ResetOnSpawn = false; APGui.DisplayOrder = 9999999990
+    pcall(function()
+        if gethui then APGui.Parent = gethui()
+        else APGui.Parent = CoreGui end
+    end)
+    adminPanelGui = APGui
+
+    local APOverlay = Instance.new("Frame", APGui)
+    APOverlay.Size = UDim2.new(1, 0, 1, 0)
+    APOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    APOverlay.BackgroundTransparency = 0.5
+    APOverlay.BorderSizePixel = 0
+
+    local APFrame = Instance.new("Frame", APOverlay)
+    APFrame.Size = UDim2.new(0, 680, 0, 620)
+    APFrame.Position = UDim2.new(0.5, -340, 0.5, -310)
+    APFrame.BackgroundColor3 = Color3.fromRGB(4, 4, 8)
+    APFrame.BorderSizePixel = 0; APFrame.Active = true; APFrame.Draggable = true
+    Instance.new("UICorner", APFrame).CornerRadius = UDim.new(0, 14)
+    local APStroke = Instance.new("UIStroke", APFrame)
+    APStroke.Color = Color3.fromRGB(255, 160, 20); APStroke.Thickness = 2
+
+    local APTitleBar = Instance.new("Frame", APFrame)
+    APTitleBar.Size = UDim2.new(1, 0, 0, 52)
+    APTitleBar.BackgroundColor3 = Color3.fromRGB(8, 8, 12); APTitleBar.BorderSizePixel = 0
+    Instance.new("UICorner", APTitleBar).CornerRadius = UDim.new(0, 14)
+    local APTFix = Instance.new("Frame", APTitleBar)
+    APTFix.Size = UDim2.new(1, 0, 0, 24); APTFix.Position = UDim2.new(0, 0, 1, -24)
+    APTFix.BackgroundColor3 = Color3.fromRGB(8, 8, 12); APTFix.BorderSizePixel = 0
+    local APGrad = Instance.new("UIGradient", APTitleBar)
+    APGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(8, 8, 12)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 60, 0))
+    }); APGrad.Rotation = 0
+    local APIcon = Instance.new("TextLabel", APTitleBar)
+    APIcon.Size = UDim2.new(0, 40, 1, 0); APIcon.Position = UDim2.new(0, 10, 0, 0)
+    APIcon.BackgroundTransparency = 1; APIcon.Text = "👑"; APIcon.Font = Enum.Font.GothamBold
+    APIcon.TextSize = 22; APIcon.TextColor3 = Color3.fromRGB(255, 200, 50)
+    local APTitle = Instance.new("TextLabel", APTitleBar)
+    APTitle.Size = UDim2.new(1, -120, 0, 28); APTitle.Position = UDim2.new(0, 55, 0, 5)
+    APTitle.BackgroundTransparency = 1; APTitle.Text = "ZNK HUB — Panel Admin"
+    APTitle.Font = Enum.Font.GothamBold; APTitle.TextSize = 17
+    APTitle.TextColor3 = Color3.fromRGB(255, 200, 50); APTitle.TextXAlignment = Enum.TextXAlignment.Left
+    local APCloseBtn = Instance.new("TextButton", APTitleBar)
+    APCloseBtn.Size = UDim2.new(0, 32, 0, 32); APCloseBtn.Position = UDim2.new(1, -42, 0.5, -16)
+    APCloseBtn.BackgroundColor3 = Color3.fromRGB(38, 20, 28); APCloseBtn.Text = "✕"
+    APCloseBtn.Font = Enum.Font.GothamBold; APCloseBtn.TextSize = 14
+    APCloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255); APCloseBtn.AutoButtonColor = false
+    Instance.new("UICorner", APCloseBtn).CornerRadius = UDim.new(0, 7)
+    APCloseBtn.MouseButton1Click:Connect(function() APGui:Destroy(); adminPanelGui = nil end)
+
+    -- Zone login admin
+    local LoginZone = Instance.new("Frame", APFrame)
+    LoginZone.Size = UDim2.new(1, -40, 0, 170); LoginZone.Position = UDim2.new(0, 20, 0, 65)
+    LoginZone.BackgroundColor3 = Color3.fromRGB(12, 10, 18); LoginZone.BorderSizePixel = 0
+    Instance.new("UICorner", LoginZone).CornerRadius = UDim.new(0, 10)
+    local LZStroke = Instance.new("UIStroke", LoginZone)
+    LZStroke.Color = Color3.fromRGB(255, 160, 20); LZStroke.Thickness = 1
+    local LZTitle = Instance.new("TextLabel", LoginZone)
+    LZTitle.Size = UDim2.new(1, 0, 0, 22); LZTitle.Position = UDim2.new(0, 0, 0, 14)
+    LZTitle.BackgroundTransparency = 1; LZTitle.Text = "🔐 CODE ADMINISTRATEUR"
+    LZTitle.Font = Enum.Font.GothamBold; LZTitle.TextSize = 12
+    LZTitle.TextColor3 = Color3.fromRGB(255, 160, 20)
+    local LZInputBG = Instance.new("Frame", LoginZone)
+    LZInputBG.Size = UDim2.new(1, -40, 0, 40); LZInputBG.Position = UDim2.new(0, 20, 0, 44)
+    LZInputBG.BackgroundColor3 = Color3.fromRGB(20, 18, 28); LZInputBG.BorderSizePixel = 0
+    Instance.new("UICorner", LZInputBG).CornerRadius = UDim.new(0, 8)
+    local LZInputStroke = Instance.new("UIStroke", LZInputBG)
+    LZInputStroke.Color = Color3.fromRGB(80, 60, 100); LZInputStroke.Thickness = 1.5
+    local LZInput = Instance.new("TextBox", LZInputBG)
+    LZInput.Size = UDim2.new(1, -16, 1, 0); LZInput.Position = UDim2.new(0, 8, 0, 0)
+    LZInput.BackgroundTransparency = 1; LZInput.PlaceholderText = "Entrez le code admin..."
+    LZInput.PlaceholderColor3 = Color3.fromRGB(80, 70, 100); LZInput.Text = ""
+    LZInput.Font = Enum.Font.GothamBold; LZInput.TextSize = 13
+    LZInput.TextColor3 = Color3.fromRGB(238, 236, 242); LZInput.ClearTextOnFocus = false
+    local LZBtn = Instance.new("TextButton", LoginZone)
+    LZBtn.Size = UDim2.new(1, -40, 0, 36); LZBtn.Position = UDim2.new(0, 20, 0, 96)
+    LZBtn.BackgroundColor3 = Color3.fromRGB(180, 110, 10); LZBtn.Text = "ACCÉDER AU PANEL"
+    LZBtn.Font = Enum.Font.GothamBold; LZBtn.TextSize = 13
+    LZBtn.TextColor3 = Color3.fromRGB(255, 255, 255); LZBtn.AutoButtonColor = false
+    Instance.new("UICorner", LZBtn).CornerRadius = UDim.new(0, 8)
+    local LZMsg = Instance.new("TextLabel", LoginZone)
+    LZMsg.Size = UDim2.new(1, 0, 0, 16); LZMsg.Position = UDim2.new(0, 0, 1, -18)
+    LZMsg.BackgroundTransparency = 1; LZMsg.Text = ""; LZMsg.Font = Enum.Font.GothamBold
+    LZMsg.TextSize = 11; LZMsg.TextColor3 = Color3.fromRGB(220, 80, 80)
+
+    local MainZone = Instance.new("Frame", APFrame)
+    MainZone.Size = UDim2.new(1, 0, 1, -58); MainZone.Position = UDim2.new(0, 0, 0, 58)
+    MainZone.BackgroundTransparency = 1; MainZone.Visible = false
+
+    local CatSidebar = Instance.new("Frame", MainZone)
+    CatSidebar.Size = UDim2.new(0, 122, 1, -8); CatSidebar.Position = UDim2.new(0, 8, 0, 4)
+    CatSidebar.BackgroundColor3 = Color3.fromRGB(10, 8, 15); CatSidebar.BorderSizePixel = 0
+    Instance.new("UICorner", CatSidebar).CornerRadius = UDim.new(0, 10)
+    Instance.new("UIStroke", CatSidebar).Color = Color3.fromRGB(255, 160, 20)
+    local CatListLayout = Instance.new("UIListLayout", CatSidebar)
+    CatListLayout.Padding = UDim.new(0, 6); CatListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    CatListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    local CatPad = Instance.new("UIPadding", CatSidebar)
+    CatPad.PaddingTop = UDim.new(0, 10); CatPad.PaddingLeft = UDim.new(0, 6); CatPad.PaddingRight = UDim.new(0, 6)
+
+    local CatContent = Instance.new("Frame", MainZone)
+    CatContent.Size = UDim2.new(1, -142, 1, -8); CatContent.Position = UDim2.new(0, 138, 0, 4)
+    CatContent.BackgroundColor3 = Color3.fromRGB(10, 8, 15); CatContent.BorderSizePixel = 0
+    Instance.new("UICorner", CatContent).CornerRadius = UDim.new(0, 10)
+    Instance.new("UIStroke", CatContent).Color = Color3.fromRGB(255, 160, 20)
+
+    local currentCat = "key"
+
+    local function makeCatBtn(icon, label, catName)
+        local Btn = Instance.new("TextButton", CatSidebar)
+        Btn.Size = UDim2.new(1, 0, 0, 54); Btn.BackgroundColor3 = Color3.fromRGB(20, 16, 28)
+        Btn.Text = ""; Btn.AutoButtonColor = false; Btn.BorderSizePixel = 0
+        Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 8)
+        local BtnIcon = Instance.new("TextLabel", Btn)
+        BtnIcon.Size = UDim2.new(1, 0, 0, 26); BtnIcon.Position = UDim2.new(0, 0, 0, 6)
+        BtnIcon.BackgroundTransparency = 1; BtnIcon.Text = icon; BtnIcon.Font = Enum.Font.GothamBold
+        BtnIcon.TextSize = 20; BtnIcon.TextColor3 = Color3.fromRGB(160, 140, 100)
+        local BtnLbl = Instance.new("TextLabel", Btn)
+        BtnLbl.Size = UDim2.new(1, 0, 0, 16); BtnLbl.Position = UDim2.new(0, 0, 0, 33)
+        BtnLbl.BackgroundTransparency = 1; BtnLbl.Text = label; BtnLbl.Font = Enum.Font.GothamBold
+        BtnLbl.TextSize = 11; BtnLbl.TextColor3 = Color3.fromRGB(160, 140, 100)
+        local ActiveBar = Instance.new("Frame", Btn)
+        ActiveBar.Size = UDim2.new(0, 3, 0.7, 0); ActiveBar.Position = UDim2.new(0, 0, 0.15, 0)
+        ActiveBar.BackgroundColor3 = Color3.fromRGB(255, 160, 20); ActiveBar.BorderSizePixel = 0
+        ActiveBar.Visible = (catName == currentCat)
+        Instance.new("UICorner", ActiveBar).CornerRadius = UDim.new(1, 0)
+        if catName == currentCat then
+            Btn.BackgroundColor3 = Color3.fromRGB(40, 28, 10)
+            BtnIcon.TextColor3 = Color3.fromRGB(255, 200, 50)
+            BtnLbl.TextColor3 = Color3.fromRGB(255, 160, 20)
+        end
+        return Btn, BtnIcon, BtnLbl, ActiveBar
+    end
+
+    -- PAGE KEY
+    local KeyPage = Instance.new("Frame", CatContent)
+    KeyPage.Size = UDim2.new(1, 0, 1, 0); KeyPage.BackgroundTransparency = 1; KeyPage.Visible = true
+
+    local CreateSec = Instance.new("Frame", KeyPage)
+    -- Agrandit pour inclure la durée personnalisée
+    CreateSec.Size = UDim2.new(1, -16, 0, 190); CreateSec.Position = UDim2.new(0, 8, 0, 8)
+    CreateSec.BackgroundColor3 = Color3.fromRGB(14, 12, 20); CreateSec.BorderSizePixel = 0
+    Instance.new("UICorner", CreateSec).CornerRadius = UDim.new(0, 8)
+    local CSSt = Instance.new("UIStroke", CreateSec)
+    CSSt.Color = Color3.fromRGB(255, 160, 20); CSSt.Thickness = 1; CSSt.Transparency = 0.5
+    local CSTitle = Instance.new("TextLabel", CreateSec)
+    CSTitle.Size = UDim2.new(1, -16, 0, 22); CSTitle.Position = UDim2.new(0, 8, 0, 6)
+    CSTitle.BackgroundTransparency = 1; CSTitle.Text = "➕ CRÉER UNE KEY"
+    CSTitle.Font = Enum.Font.GothamBold; CSTitle.TextSize = 11
+    CSTitle.TextColor3 = Color3.fromRGB(255, 160, 20); CSTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+    -- Durées prédéfinies
+    local durationOptions = {
+        {label="1h",  seconds=3600},    {label="6h",  seconds=21600},
+        {label="1j",  seconds=86400},   {label="7j",  seconds=604800},
+        {label="30j", seconds=2592000}, {label="∞",   seconds=999999999}
+    }
+    local selectedDuration = 86400
+    local durationBtns = {}
+    local customDurationActive = false
+
+    local function refreshDurationBtns()
+        for _, d in ipairs(durationBtns) do
+            d.btn.BackgroundColor3 = (not customDurationActive and d.seconds == selectedDuration)
+                and Color3.fromRGB(180, 100, 10)
+                or  Color3.fromRGB(28, 22, 36)
+        end
+    end
+
+    for i, opt in ipairs(durationOptions) do
+        local DBtn = Instance.new("TextButton", CreateSec)
+        DBtn.Size = UDim2.new(0, 50, 0, 22)
+        DBtn.Position = UDim2.new(0, 8 + (i-1)*56, 0, 30)
+        DBtn.BackgroundColor3 = opt.seconds == selectedDuration and Color3.fromRGB(180, 100, 10) or Color3.fromRGB(28, 22, 36)
+        DBtn.Text = opt.label; DBtn.Font = Enum.Font.GothamBold; DBtn.TextSize = 11
+        DBtn.TextColor3 = Color3.fromRGB(255, 230, 200); DBtn.AutoButtonColor = false; DBtn.BorderSizePixel = 0
+        Instance.new("UICorner", DBtn).CornerRadius = UDim.new(0, 6)
+        table.insert(durationBtns, {btn=DBtn, seconds=opt.seconds})
+        DBtn.MouseButton1Click:Connect(function()
+            selectedDuration = opt.seconds
+            customDurationActive = false
+            refreshDurationBtns()
+        end)
+    end
+
+    -- DURÉE PERSONNALISÉE
+    local CustomDurLabel = Instance.new("TextLabel", CreateSec)
+    CustomDurLabel.Size = UDim2.new(1, -16, 0, 16); CustomDurLabel.Position = UDim2.new(0, 8, 0, 60)
+    CustomDurLabel.BackgroundTransparency = 1; CustomDurLabel.Text = "Durée personnalisée :"
+    CustomDurLabel.Font = Enum.Font.GothamBold; CustomDurLabel.TextSize = 10
+    CustomDurLabel.TextColor3 = Color3.fromRGB(200, 180, 100); CustomDurLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    local CustomDurRow = Instance.new("Frame", CreateSec)
+    CustomDurRow.Size = UDim2.new(1, -16, 0, 28); CustomDurRow.Position = UDim2.new(0, 8, 0, 78)
+    CustomDurRow.BackgroundTransparency = 1; CustomDurRow.BorderSizePixel = 0
+
+    local function makeCustomDurInput(parent, xPos, w, placeholder)
+        local BG = Instance.new("Frame", parent)
+        BG.Size = UDim2.new(0, w, 1, 0); BG.Position = UDim2.new(0, xPos, 0, 0)
+        BG.BackgroundColor3 = Color3.fromRGB(20, 18, 28); BG.BorderSizePixel = 0
+        Instance.new("UICorner", BG).CornerRadius = UDim.new(0, 5)
+        Instance.new("UIStroke", BG).Color = Color3.fromRGB(80, 60, 100)
+        local Input = Instance.new("TextBox", BG)
+        Input.Size = UDim2.new(1, -8, 1, 0); Input.Position = UDim2.new(0, 4, 0, 0)
+        Input.BackgroundTransparency = 1; Input.PlaceholderText = placeholder
+        Input.PlaceholderColor3 = Color3.fromRGB(80, 70, 100); Input.Text = ""
+        Input.Font = Enum.Font.GothamBold; Input.TextSize = 11
+        Input.TextColor3 = Color3.fromRGB(238, 236, 242); Input.ClearTextOnFocus = false
+        return Input
+    end
+
+    local DurDaysInput  = makeCustomDurInput(CustomDurRow, 0,   52, "jours")
+    local DurHoursInput = makeCustomDurInput(CustomDurRow, 58,  52, "heures")
+    local DurMinsInput  = makeCustomDurInput(CustomDurRow, 116, 52, "mins")
+    local DurSecsInput  = makeCustomDurInput(CustomDurRow, 174, 52, "secs")
+
+    local DurLabels = {{"j",0},{" h",58},{" m",116},{" s",174}}
+    for _, dl in ipairs(DurLabels) do
+        local L2 = Instance.new("TextLabel", CustomDurRow)
+        L2.Size = UDim2.new(0, 8, 1, 0); L2.Position = UDim2.new(0, dl[2]+44, 0, 0)
+        L2.BackgroundTransparency = 1; L2.Text = ""; L2.Font = Enum.Font.Gotham; L2.TextSize = 10
+        L2.TextColor3 = Color3.fromRGB(180, 160, 100)
+    end
+
+    local ApplyCustomDurBtn = Instance.new("TextButton", CustomDurRow)
+    ApplyCustomDurBtn.Size = UDim2.new(0, 70, 1, 0); ApplyCustomDurBtn.Position = UDim2.new(0, 232, 0, 0)
+    ApplyCustomDurBtn.BackgroundColor3 = Color3.fromRGB(40, 80, 40); ApplyCustomDurBtn.Text = "Appliquer"
+    ApplyCustomDurBtn.Font = Enum.Font.GothamBold; ApplyCustomDurBtn.TextSize = 10
+    ApplyCustomDurBtn.TextColor3 = Color3.fromRGB(200, 255, 200); ApplyCustomDurBtn.AutoButtonColor = false; ApplyCustomDurBtn.BorderSizePixel = 0
+    Instance.new("UICorner", ApplyCustomDurBtn).CornerRadius = UDim.new(0, 5)
+
+    local CustomDurStatusLbl = Instance.new("TextLabel", CreateSec)
+    CustomDurStatusLbl.Size = UDim2.new(1, -16, 0, 14); CustomDurStatusLbl.Position = UDim2.new(0, 8, 0, 110)
+    CustomDurStatusLbl.BackgroundTransparency = 1; CustomDurStatusLbl.Text = ""
+    CustomDurStatusLbl.Font = Enum.Font.GothamBold; CustomDurStatusLbl.TextSize = 10
+    CustomDurStatusLbl.TextColor3 = Color3.fromRGB(200, 255, 150); CustomDurStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    ApplyCustomDurBtn.MouseButton1Click:Connect(function()
+        local d = tonumber(DurDaysInput.Text) or 0
+        local h = tonumber(DurHoursInput.Text) or 0
+        local m = tonumber(DurMinsInput.Text) or 0
+        local s = tonumber(DurSecsInput.Text) or 0
+        local total = d*86400 + h*3600 + m*60 + s
+        if total <= 0 then
+            CustomDurStatusLbl.Text = "Entrez une durée valide."; CustomDurStatusLbl.TextColor3 = Color3.fromRGB(220, 80, 80); return
+        end
+        selectedDuration = total
+        customDurationActive = true
+        refreshDurationBtns()
+        CustomDurStatusLbl.Text = "Durée: "..formatTime(total); CustomDurStatusLbl.TextColor3 = Color3.fromRGB(100, 220, 100)
+    end)
+
+    local CustomKeyLabel = Instance.new("TextLabel", CreateSec)
+    CustomKeyLabel.Size = UDim2.new(0, 110, 0, 16); CustomKeyLabel.Position = UDim2.new(0, 8, 0, 132)
+    CustomKeyLabel.BackgroundTransparency = 1; CustomKeyLabel.Text = "Nom de la key:"
+    CustomKeyLabel.Font = Enum.Font.GothamBold; CustomKeyLabel.TextSize = 10
+    CustomKeyLabel.TextColor3 = Color3.fromRGB(150, 140, 160); CustomKeyLabel.TextXAlignment = Enum.TextXAlignment.Left
+    local CustomKeyBG = Instance.new("Frame", CreateSec)
+    CustomKeyBG.Size = UDim2.new(1, -170, 0, 22); CustomKeyBG.Position = UDim2.new(0, 120, 0, 130)
+    CustomKeyBG.BackgroundColor3 = Color3.fromRGB(20, 18, 28); CustomKeyBG.BorderSizePixel = 0
+    Instance.new("UICorner", CustomKeyBG).CornerRadius = UDim.new(0, 5)
+    Instance.new("UIStroke", CustomKeyBG).Color = Color3.fromRGB(80, 60, 100)
+    local CustomKeyInput = Instance.new("TextBox", CustomKeyBG)
+    CustomKeyInput.Size = UDim2.new(1, -8, 1, 0); CustomKeyInput.Position = UDim2.new(0, 4, 0, 0)
+    CustomKeyInput.BackgroundTransparency = 1; CustomKeyInput.PlaceholderText = "NOM-KEY (vide = auto)"
+    CustomKeyInput.PlaceholderColor3 = Color3.fromRGB(80, 70, 100); CustomKeyInput.Text = ""
+    CustomKeyInput.Font = Enum.Font.GothamBold; CustomKeyInput.TextSize = 11
+    CustomKeyInput.TextColor3 = Color3.fromRGB(238, 236, 242); CustomKeyInput.ClearTextOnFocus = false
+
+    local GenerateBtn = Instance.new("TextButton", CreateSec)
+    GenerateBtn.Size = UDim2.new(1, -16, 0, 30); GenerateBtn.Position = UDim2.new(0, 8, 0, 158)
+    GenerateBtn.BackgroundColor3 = Color3.fromRGB(180, 100, 10); GenerateBtn.Text = "🔑 GÉNÉRER LA KEY"
+    GenerateBtn.Font = Enum.Font.GothamBold; GenerateBtn.TextSize = 12
+    GenerateBtn.TextColor3 = Color3.fromRGB(255, 255, 255); GenerateBtn.AutoButtonColor = false
+    Instance.new("UICorner", GenerateBtn).CornerRadius = UDim.new(0, 7)
+
+    local KeyStatusLbl = Instance.new("TextLabel", KeyPage)
+    KeyStatusLbl.Size = UDim2.new(1, -16, 0, 14); KeyStatusLbl.Position = UDim2.new(0, 8, 1, -18)
+    KeyStatusLbl.BackgroundTransparency = 1; KeyStatusLbl.Text = ""
+    KeyStatusLbl.Font = Enum.Font.GothamBold; KeyStatusLbl.TextSize = 10
+    KeyStatusLbl.TextColor3 = Color3.fromRGB(50, 200, 100); KeyStatusLbl.TextXAlignment = Enum.TextXAlignment.Center
+
+    local KeyListTitle = Instance.new("TextLabel", KeyPage)
+    KeyListTitle.Size = UDim2.new(1, -16, 0, 18); KeyListTitle.Position = UDim2.new(0, 8, 0, 204)
+    KeyListTitle.BackgroundTransparency = 1; KeyListTitle.Text = "TOUTES LES KEYS"
+    KeyListTitle.Font = Enum.Font.GothamBold; KeyListTitle.TextSize = 11
+    KeyListTitle.TextColor3 = Color3.fromRGB(255, 160, 20); KeyListTitle.TextXAlignment = Enum.TextXAlignment.Left
+    local KeyListScroll = Instance.new("ScrollingFrame", KeyPage)
+    KeyListScroll.Size = UDim2.new(1, -16, 1, -240); KeyListScroll.Position = UDim2.new(0, 8, 0, 226)
+    KeyListScroll.BackgroundColor3 = Color3.fromRGB(8, 6, 12); KeyListScroll.BorderSizePixel = 0
+    KeyListScroll.ScrollBarThickness = 3; KeyListScroll.ScrollBarImageColor3 = Color3.fromRGB(255, 160, 20)
+    KeyListScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    Instance.new("UICorner", KeyListScroll).CornerRadius = UDim.new(0, 7)
+    Instance.new("UIStroke", KeyListScroll).Color = Color3.fromRGB(60, 45, 75)
+    local KLLayout = Instance.new("UIListLayout", KeyListScroll)
+    KLLayout.Padding = UDim.new(0, 3); KLLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    local KLPad = Instance.new("UIPadding", KeyListScroll)
+    KLPad.PaddingTop = UDim.new(0, 4); KLPad.PaddingLeft = UDim.new(0, 5)
+    KLPad.PaddingRight = UDim.new(0, 5); KLPad.PaddingBottom = UDim.new(0, 4)
+    KLLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        KeyListScroll.CanvasSize = UDim2.new(0, 0, 0, KLLayout.AbsoluteContentSize.Y + 8)
+    end)
+
+    local function copyToClipboard(text)
+        pcall(function()
+            if setclipboard then setclipboard(text)
+            elseif syn and syn.clipboard then syn.clipboard.set(text) end
+        end)
+    end
+    local function generateRandomKey(prefix)
+        prefix = prefix or "ZNK"
+        local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        local function rand4()
+            local r = ""
+            for i = 1, 4 do
+                local p = math.random(1, #chars); r = r..chars:sub(p, p)
+            end
+            return r
+        end
+        return prefix.."-"..rand4().."-"..rand4().."-"..rand4()
+    end
+
+    local function refreshKeyList()
+        for _, child in pairs(KeyListScroll:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        local allKeys = {}
+        for _, k in pairs(VALID_KEYS) do table.insert(allKeys, {key=k, isCustom=false}) end
+        for _, entry in pairs(loadCustomKeys()) do
+            if type(entry) == "table" then
+                table.insert(allKeys, {key=entry.key, isCustom=true, duration=entry.duration, createdAt=entry.createdAt})
+            elseif type(entry) == "string" then
+                table.insert(allKeys, {key=entry, isCustom=true})
+            end
+        end
+        if #allKeys == 0 then
+            local NoKey = Instance.new("TextLabel", KeyListScroll)
+            NoKey.Size = UDim2.new(1, 0, 0, 28); NoKey.BackgroundTransparency = 1
+            NoKey.Text = "Aucune key."; NoKey.Font = Enum.Font.Gotham; NoKey.TextSize = 11
+            NoKey.TextColor3 = Color3.fromRGB(120, 110, 140); return
+        end
+        for _, entry in ipairs(allKeys) do
+            local Row = Instance.new("Frame", KeyListScroll)
+            Row.Size = UDim2.new(1, 0, 0, 34); Row.BackgroundColor3 = Color3.fromRGB(16, 12, 24); Row.BorderSizePixel = 0
+            Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 6)
+            local RowSt = Instance.new("UIStroke", Row)
+            RowSt.Color = entry.isCustom and Color3.fromRGB(80, 180, 80) or Color3.fromRGB(80, 50, 120); RowSt.Thickness = 1
+            local Badge = Instance.new("TextLabel", Row)
+            Badge.Size = UDim2.new(0, 54, 0, 16); Badge.Position = UDim2.new(0, 5, 0.5, -8)
+            Badge.BackgroundColor3 = entry.isCustom and Color3.fromRGB(20, 60, 20) or Color3.fromRGB(40, 20, 60)
+            Badge.Text = entry.isCustom and "CUSTOM" or "BUILTIN"; Badge.Font = Enum.Font.GothamBold; Badge.TextSize = 9
+            Badge.TextColor3 = entry.isCustom and Color3.fromRGB(80, 220, 80) or Color3.fromRGB(185, 45, 255); Badge.BorderSizePixel = 0
+            Instance.new("UICorner", Badge).CornerRadius = UDim.new(0, 4)
+            local KeyLbl = Instance.new("TextLabel", Row)
+            KeyLbl.Size = UDim2.new(1, -230, 1, 0); KeyLbl.Position = UDim2.new(0, 65, 0, 0)
+            KeyLbl.BackgroundTransparency = 1; KeyLbl.Text = entry.key; KeyLbl.Font = Enum.Font.GothamBold
+            KeyLbl.TextSize = 10; KeyLbl.TextColor3 = Color3.fromRGB(238, 236, 242)
+            KeyLbl.TextXAlignment = Enum.TextXAlignment.Left; KeyLbl.TextTruncate = Enum.TextTruncate.AtEnd
+            if entry.isCustom and entry.duration then
+                local DurLbl = Instance.new("TextLabel", Row)
+                DurLbl.Size = UDim2.new(0, 72, 1, 0); DurLbl.Position = UDim2.new(1, -215, 0, 0)
+                DurLbl.BackgroundTransparency = 1; DurLbl.Text = "⏱ "..formatTime(entry.duration)
+                DurLbl.Font = Enum.Font.GothamBold; DurLbl.TextSize = 10
+                DurLbl.TextColor3 = Color3.fromRGB(180, 160, 100); DurLbl.TextXAlignment = Enum.TextXAlignment.Left
+            end
+            local CopyBtn = Instance.new("TextButton", Row)
+            CopyBtn.Size = UDim2.new(0, 62, 0, 22); CopyBtn.Position = UDim2.new(1, -136, 0.5, -11)
+            CopyBtn.BackgroundColor3 = Color3.fromRGB(30, 90, 170); CopyBtn.Text = "Copier"
+            CopyBtn.Font = Enum.Font.GothamBold; CopyBtn.TextSize = 10
+            CopyBtn.TextColor3 = Color3.fromRGB(255, 255, 255); CopyBtn.AutoButtonColor = false
+            Instance.new("UICorner", CopyBtn).CornerRadius = UDim.new(0, 5)
+            CopyBtn.MouseButton1Click:Connect(function()
+                copyToClipboard(entry.key)
+                CopyBtn.Text = "Copié!"; CopyBtn.BackgroundColor3 = Color3.fromRGB(20, 120, 60)
+                task.delay(1.5, function() CopyBtn.Text = "Copier"; CopyBtn.BackgroundColor3 = Color3.fromRGB(30, 90, 170) end)
+                KeyStatusLbl.Text = "Copié : "..entry.key:sub(1, 28); KeyStatusLbl.TextColor3 = Color3.fromRGB(50, 200, 100)
+            end)
+            if entry.isCustom then
+                local DelBtn = Instance.new("TextButton", Row)
+                DelBtn.Size = UDim2.new(0, 60, 0, 22); DelBtn.Position = UDim2.new(1, -68, 0.5, -11)
+                DelBtn.BackgroundColor3 = Color3.fromRGB(100, 20, 30); DelBtn.Text = "Suppr"
+                DelBtn.Font = Enum.Font.GothamBold; DelBtn.TextSize = 10
+                DelBtn.TextColor3 = Color3.fromRGB(255, 255, 255); DelBtn.AutoButtonColor = false
+                Instance.new("UICorner", DelBtn).CornerRadius = UDim.new(0, 5)
+                DelBtn.MouseButton1Click:Connect(function()
+                    local ck = loadCustomKeys(); local newCK = {}
+                    for _, k in pairs(ck) do
+                        local kval = type(k) == "table" and k.key or k
+                        if kval ~= entry.key then table.insert(newCK, k) end
+                    end
+                    saveCustomKeys(newCK)
+                    KeyStatusLbl.Text = "Key supprimée"; KeyStatusLbl.TextColor3 = Color3.fromRGB(220, 80, 80)
+                    refreshKeyList()
+                end)
+            end
+        end
+    end
+
+    GenerateBtn.MouseButton1Click:Connect(function()
+        local customName = CustomKeyInput.Text:gsub("%s", "")
+        local newKey = customName ~= "" and customName or generateRandomKey("ZNK")
+        if isKeyValid(newKey) then
+            KeyStatusLbl.Text = "Key déjà existante!"; KeyStatusLbl.TextColor3 = Color3.fromRGB(220, 180, 40); return
+        end
+        local ck = loadCustomKeys()
+        table.insert(ck, {key=newKey, duration=selectedDuration, createdAt=os.time and os.time() or 0})
+        saveCustomKeys(ck); CustomKeyInput.Text = ""
+        KeyStatusLbl.Text = "Key: "..newKey.." ["..formatTime(selectedDuration).."]"
+        KeyStatusLbl.TextColor3 = Color3.fromRGB(50, 200, 100)
+        refreshKeyList()
+    end)
+
+    -- PAGE ACCOUNTS
+    local AccountPage = Instance.new("Frame", CatContent)
+    AccountPage.Size = UDim2.new(1, 0, 1, 0); AccountPage.BackgroundTransparency = 1; AccountPage.Visible = false
+    local AccTitle = Instance.new("TextLabel", AccountPage)
+    AccTitle.Size = UDim2.new(1, -16, 0, 24); AccTitle.Position = UDim2.new(0, 8, 0, 8)
+    AccTitle.BackgroundTransparency = 1; AccTitle.Text = "👤 COMPTES ENREGISTRÉS"
+    AccTitle.Font = Enum.Font.GothamBold; AccTitle.TextSize = 12
+    AccTitle.TextColor3 = Color3.fromRGB(255, 160, 20); AccTitle.TextXAlignment = Enum.TextXAlignment.Left
+    local AccScroll = Instance.new("ScrollingFrame", AccountPage)
+    AccScroll.Size = UDim2.new(1, -16, 1, -40); AccScroll.Position = UDim2.new(0, 8, 0, 36)
+    AccScroll.BackgroundColor3 = Color3.fromRGB(8, 6, 12); AccScroll.BorderSizePixel = 0
+    AccScroll.ScrollBarThickness = 3; AccScroll.ScrollBarImageColor3 = Color3.fromRGB(255, 160, 20)
+    AccScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    Instance.new("UICorner", AccScroll).CornerRadius = UDim.new(0, 7)
+    local AccLayout = Instance.new("UIListLayout", AccScroll)
+    AccLayout.Padding = UDim.new(0, 3); AccLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    local AccPad = Instance.new("UIPadding", AccScroll)
+    AccPad.PaddingTop = UDim.new(0, 5); AccPad.PaddingLeft = UDim.new(0, 6)
+    AccPad.PaddingRight = UDim.new(0, 6); AccPad.PaddingBottom = UDim.new(0, 5)
+    AccLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        AccScroll.CanvasSize = UDim2.new(0, 0, 0, AccLayout.AbsoluteContentSize.Y + 10)
+    end)
+
+    local function refreshAccountList()
+        for _, child in pairs(AccScroll:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        local accounts = loadAccounts(); local count = 0; local wl = loadWhitelist()
+        for username, data in pairs(accounts) do
+            count = count + 1
+            local Row = Instance.new("Frame", AccScroll)
+            Row.Size = UDim2.new(1, 0, 0, 44); Row.BackgroundColor3 = Color3.fromRGB(16, 12, 24); Row.BorderSizePixel = 0
+            Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 6)
+            Instance.new("UIStroke", Row).Color = Color3.fromRGB(60, 45, 90)
+            local function rowLbl(text, pos, sz, color)
+                local L = Instance.new("TextLabel", Row)
+                L.Size = UDim2.new(sz, 0, 1, 0); L.Position = UDim2.new(pos, 0, 0, 0)
+                L.BackgroundTransparency = 1; L.Text = text; L.Font = Enum.Font.GothamBold; L.TextSize = 10
+                L.TextColor3 = color or Color3.fromRGB(220, 210, 240); L.TextXAlignment = Enum.TextXAlignment.Left
+                L.TextTruncate = Enum.TextTruncate.AtEnd
+            end
+            rowLbl(username, 0, 0.22)
+            rowLbl(data.password or "—", 0.22, 0.17, Color3.fromRGB(160, 180, 255))
+            rowLbl((data.keyUsed ~= "" and data.keyUsed) or "—", 0.39, 0.21, Color3.fromRGB(150, 170, 255))
+            rowLbl(getAccountKeyRemaining(data), 0.60, 0.18, Color3.fromRGB(255, 200, 80))
+            local isWL = wl[username:lower()] ~= nil
+            local WLBadge = Instance.new("TextLabel", Row)
+            WLBadge.Size = UDim2.new(0, 50, 0, 20); WLBadge.Position = UDim2.new(0.80, 2, 0.5, -10)
+            WLBadge.BackgroundColor3 = isWL and Color3.fromRGB(20, 80, 20) or Color3.fromRGB(60, 20, 20)
+            WLBadge.Text = isWL and "✅ WL" or "❌ WL"; WLBadge.Font = Enum.Font.GothamBold; WLBadge.TextSize = 9
+            WLBadge.TextColor3 = isWL and Color3.fromRGB(80, 220, 80) or Color3.fromRGB(220, 80, 80); WLBadge.BorderSizePixel = 0
+            Instance.new("UICorner", WLBadge).CornerRadius = UDim.new(0, 4)
+            local DelAccBtn = Instance.new("TextButton", Row)
+            DelAccBtn.Size = UDim2.new(0, 22, 0, 22); DelAccBtn.Position = UDim2.new(1, -26, 0.5, -11)
+            DelAccBtn.BackgroundColor3 = Color3.fromRGB(80, 15, 20); DelAccBtn.Text = "🗑"
+            DelAccBtn.Font = Enum.Font.GothamBold; DelAccBtn.TextSize = 11
+            DelAccBtn.TextColor3 = Color3.fromRGB(255, 100, 100); DelAccBtn.AutoButtonColor = false; DelAccBtn.BorderSizePixel = 0
+            Instance.new("UICorner", DelAccBtn).CornerRadius = UDim.new(0, 5)
+            DelAccBtn.MouseButton1Click:Connect(function()
+                local accs = loadAccounts(); accs[username] = nil; saveAccounts(accs)
+                removeFromWhitelist(username)
+                if username:lower() == loggedUsername:lower() then
+                    task.delay(0.2, function() forceDisconnect("Votre compte a été supprimé.") end)
+                end
+                refreshAccountList()
+            end)
+        end
+        if count == 0 then
+            local NoAcc = Instance.new("TextLabel", AccScroll)
+            NoAcc.Size = UDim2.new(1, 0, 0, 30); NoAcc.BackgroundTransparency = 1
+            NoAcc.Text = "Aucun compte enregistré."; NoAcc.Font = Enum.Font.Gotham
+            NoAcc.TextSize = 11; NoAcc.TextColor3 = Color3.fromRGB(120, 110, 140)
+        end
+    end
+
+    local keyBtn, keyIcon, keyLbl, keyBar = makeCatBtn("🔑", "Keys", "key")
+    local accBtn, accIcon, accLbl, accBar = makeCatBtn("👤", "Accounts", "account")
+
+    local function switchCat(cat)
+        currentCat = cat
+        KeyPage.Visible = (cat == "key"); AccountPage.Visible = (cat == "account")
+        if cat == "account" then refreshAccountList() end
+        if cat == "key" then refreshKeyList() end
+        TweenService:Create(keyBtn, TweenInfo.new(0.2), {BackgroundColor3 = cat == "key" and Color3.fromRGB(40, 28, 10) or Color3.fromRGB(20, 16, 28)}):Play()
+        keyBar.Visible = (cat == "key"); keyIcon.TextColor3 = cat == "key" and Color3.fromRGB(255, 200, 50) or Color3.fromRGB(160, 140, 100)
+        keyLbl.TextColor3 = cat == "key" and Color3.fromRGB(255, 160, 20) or Color3.fromRGB(160, 140, 100)
+        TweenService:Create(accBtn, TweenInfo.new(0.2), {BackgroundColor3 = cat == "account" and Color3.fromRGB(40, 28, 10) or Color3.fromRGB(20, 16, 28)}):Play()
+        accBar.Visible = (cat == "account"); accIcon.TextColor3 = cat == "account" and Color3.fromRGB(255, 200, 50) or Color3.fromRGB(160, 140, 100)
+        accLbl.TextColor3 = cat == "account" and Color3.fromRGB(255, 160, 20) or Color3.fromRGB(160, 140, 100)
+    end
+    keyBtn.MouseButton1Click:Connect(function() switchCat("key") end)
+    accBtn.MouseButton1Click:Connect(function() switchCat("account") end)
+
+    LZBtn.MouseButton1Click:Connect(function()
+        if LZInput.Text == ADMIN_CODE then
+            LoginZone.Visible = false; MainZone.Visible = true; adminAuthenticated = true
+            KeyPage.Visible = true; AccountPage.Visible = false; refreshKeyList()
+        else
+            LZMsg.Text = "❌ Code incorrect."
+            TweenService:Create(LZInputStroke, TweenInfo.new(0.15), {Color=Color3.fromRGB(220, 40, 40)}):Play()
+            task.delay(0.8, function() TweenService:Create(LZInputStroke, TweenInfo.new(0.2), {Color=Color3.fromRGB(80, 60, 100)}):Play() end)
+            task.delay(1.5, function() LZMsg.Text = "" end)
+        end
+    end)
+    if adminAuthenticated then LoginZone.Visible = false; MainZone.Visible = true; refreshKeyList() end
+
+    APFrame.Size = UDim2.new(0, 0, 0, 0); APFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+    TweenService:Create(APFrame, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 680, 0, 620), Position = UDim2.new(0.5, -340, 0.5, -310)
+    }):Play()
+end
+
+-- ============================================================
+-- POPUP SAUVEGARDE
+-- ============================================================
+local function showStartupSavePrompt(onLoad, onIgnore)
+    local promptGui = Instance.new("ScreenGui")
+    promptGui.Name = "ZNKStartupPrompt"; promptGui.ResetOnSpawn = false; promptGui.DisplayOrder = 99999999
+    pcall(function()
+        if gethui then promptGui.Parent = gethui()
+        else promptGui.Parent = CoreGui end
+    end)
+    local bg = Instance.new("Frame", promptGui)
+    bg.Size = UDim2.new(1, 0, 1, 0); bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0); bg.BackgroundTransparency = 0.45
+    local box = Instance.new("Frame", bg)
+    box.Size = UDim2.new(0, 440, 0, 210); box.Position = UDim2.new(0.5, -220, 0.5, -105)
+    box.BackgroundColor3 = Color3.fromRGB(10, 8, 16); box.BorderSizePixel = 0
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 14)
+    local bst = Instance.new("UIStroke", box); bst.Color = Color3.fromRGB(185, 45, 255); bst.Thickness = 2
+    local topBar = Instance.new("Frame", box)
+    topBar.Size = UDim2.new(1, 0, 0, 50); topBar.BackgroundColor3 = Color3.fromRGB(18, 8, 32); topBar.BorderSizePixel = 0
+    Instance.new("UICorner", topBar).CornerRadius = UDim.new(0, 14)
+    local topFix = Instance.new("Frame", topBar)
+    topFix.Size = UDim2.new(1, 0, 0, 20); topFix.Position = UDim2.new(0, 0, 1, -20)
+    topFix.BackgroundColor3 = Color3.fromRGB(18, 8, 32); topFix.BorderSizePixel = 0
+    local icon2 = Instance.new("TextLabel", topBar)
+    icon2.Size = UDim2.new(0, 36, 1, 0); icon2.Position = UDim2.new(0, 10, 0, 0); icon2.BackgroundTransparency = 1
+    icon2.Text = "💾"; icon2.Font = Enum.Font.GothamBold; icon2.TextSize = 24; icon2.TextColor3 = Color3.fromRGB(185, 45, 255)
+    local ttl = Instance.new("TextLabel", topBar)
+    ttl.Size = UDim2.new(1, -55, 1, 0); ttl.Position = UDim2.new(0, 50, 0, 0); ttl.BackgroundTransparency = 1
+    ttl.Text = "Charger la sauvegarde ?"; ttl.Font = Enum.Font.GothamBold; ttl.TextSize = 16
+    ttl.TextColor3 = Color3.fromRGB(255, 255, 255); ttl.TextXAlignment = Enum.TextXAlignment.Left
+    local desc = Instance.new("TextLabel", box)
+    desc.Size = UDim2.new(1, -30, 0, 60); desc.Position = UDim2.new(0, 15, 0, 60)
+    desc.BackgroundTransparency = 1; desc.TextWrapped = true
+    desc.Text = "Une configuration précédente a été trouvée.\nVeux-tu charger tes paramètres ou démarrer proprement ?"
+    desc.Font = Enum.Font.Gotham; desc.TextSize = 12; desc.TextColor3 = Color3.fromRGB(200, 195, 215)
+    local loadBtn = Instance.new("TextButton", box)
+    loadBtn.Size = UDim2.new(0.47, 0, 0, 40); loadBtn.Position = UDim2.new(0.02, 0, 1, -52)
+    loadBtn.BackgroundColor3 = Color3.fromRGB(120, 40, 190); loadBtn.Text = "Charger"
+    loadBtn.Font = Enum.Font.GothamBold; loadBtn.TextSize = 14
+    loadBtn.TextColor3 = Color3.fromRGB(255, 255, 255); loadBtn.AutoButtonColor = false
+    Instance.new("UICorner", loadBtn).CornerRadius = UDim.new(0, 8)
+    local skipBtn = Instance.new("TextButton", box)
+    skipBtn.Size = UDim2.new(0.47, 0, 0, 40); skipBtn.Position = UDim2.new(0.51, 0, 1, -52)
+    skipBtn.BackgroundColor3 = Color3.fromRGB(30, 24, 42); skipBtn.Text = "Ignorer"
+    skipBtn.Font = Enum.Font.GothamBold; skipBtn.TextSize = 14
+    skipBtn.TextColor3 = Color3.fromRGB(200, 195, 215); skipBtn.AutoButtonColor = false
+    Instance.new("UICorner", skipBtn).CornerRadius = UDim.new(0, 8)
+    box.Size = UDim2.new(0, 0, 0, 0); box.Position = UDim2.new(0.5, 0, 0.5, 0)
+    TweenService:Create(box, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 440, 0, 210), Position = UDim2.new(0.5, -220, 0.5, -105)
+    }):Play()
+    loadBtn.MouseButton1Click:Connect(function()
+        TweenService:Create(box, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+            Size = UDim2.new(0, 0, 0, 0), Position = UDim2.new(0.5, 0, 0.5, 0)
+        }):Play()
+        task.wait(0.35); pcall(onLoad); promptGui:Destroy()
+    end)
+    skipBtn.MouseButton1Click:Connect(function()
+        TweenService:Create(box, TweenInfo.new(0.2), {Position = UDim2.new(0.5, -220, 1.2, 0)}):Play()
+        task.wait(0.25); pcall(onIgnore); promptGui:Destroy()
+    end)
+end
+
+-- ============================================================
+-- PAGE DE CONNEXION
+-- ============================================================
+createLoginScreen = function()
+    local LoginGui = Instance.new("ScreenGui")
+    LoginGui.Name = "ZNKLogin"; LoginGui.ResetOnSpawn = false; LoginGui.DisplayOrder = 9999999999
+    pcall(function()
+        if gethui then LoginGui.Parent = gethui()
+        else LoginGui.Parent = CoreGui end
+    end)
+
+    local Overlay = Instance.new("Frame", LoginGui)
+    Overlay.Size = UDim2.new(1, 0, 1, 0); Overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 4)
+    Overlay.BackgroundTransparency = 0.08; Overlay.BorderSizePixel = 0
+    local OvGrad = Instance.new("UIGradient", Overlay)
+    OvGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 0, 0)),
+        ColorSequenceKeypoint.new(0.4, Color3.fromRGB(15, 0, 28)),
+        ColorSequenceKeypoint.new(0.7, Color3.fromRGB(8, 0, 5)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0))
+    }); OvGrad.Rotation = 135
+
+    local LoginFrame = Instance.new("Frame", Overlay)
+    LoginFrame.Size = UDim2.new(0, 470, 0, 540); LoginFrame.Position = UDim2.new(0.5, -235, 0.5, -270)
+    LoginFrame.BackgroundColor3 = Color3.fromRGB(6, 6, 10); LoginFrame.BorderSizePixel = 0
+    Instance.new("UICorner", LoginFrame).CornerRadius = UDim.new(0, 14)
+    local LFStroke = Instance.new("UIStroke", LoginFrame)
+    LFStroke.Color = Color3.fromRGB(185, 45, 255); LFStroke.Thickness = 1.8
+
+    local LTitleBar = Instance.new("Frame", LoginFrame)
+    LTitleBar.Size = UDim2.new(1, 0, 0, 58); LTitleBar.BackgroundColor3 = Color3.fromRGB(8, 8, 12); LTitleBar.BorderSizePixel = 0
+    Instance.new("UICorner", LTitleBar).CornerRadius = UDim.new(0, 14)
+    local LTFix = Instance.new("Frame", LTitleBar)
+    LTFix.Size = UDim2.new(1, 0, 0, 26); LTFix.Position = UDim2.new(0, 0, 1, -26)
+    LTFix.BackgroundColor3 = Color3.fromRGB(8, 8, 12); LTFix.BorderSizePixel = 0
+    local LGrad = Instance.new("UIGradient", LTitleBar)
+    LGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(8, 8, 12)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(80, 18, 110))
+    }); LGrad.Rotation = 0
+    local LIcon = Instance.new("TextLabel", LTitleBar)
+    LIcon.Size = UDim2.new(0, 48, 1, 0); LIcon.Position = UDim2.new(0, 10, 0, 0); LIcon.BackgroundTransparency = 1
+    LIcon.Text = "⚡"; LIcon.Font = Enum.Font.GothamBold; LIcon.TextSize = 26; LIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+    local LTitle = Instance.new("TextLabel", LTitleBar)
+    LTitle.Size = UDim2.new(1, -68, 0, 28); LTitle.Position = UDim2.new(0, 64, 0, 6)
+    LTitle.BackgroundTransparency = 1; LTitle.Text = "ZNK HUB — Connexion"
+    LTitle.Font = Enum.Font.GothamBold; LTitle.TextSize = 16; LTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+    LTitle.TextXAlignment = Enum.TextXAlignment.Left
+    local LSub = Instance.new("TextLabel", LTitleBar)
+    LSub.Size = UDim2.new(1, -68, 0, 14); LSub.Position = UDim2.new(0, 65, 0, 36)
+    LSub.BackgroundTransparency = 1; LSub.Text = "Ultimate Edition"
+    LSub.Font = Enum.Font.Gotham; LSub.TextSize = 11; LSub.TextColor3 = Color3.fromRGB(155, 150, 165)
+    LSub.TextXAlignment = Enum.TextXAlignment.Left
+
+    local function makeInput(parent, yPos, label, placeholder, isPassword)
+        local Lbl = Instance.new("TextLabel", parent)
+        Lbl.Size = UDim2.new(1, -40, 0, 16); Lbl.Position = UDim2.new(0, 20, 0, yPos)
+        Lbl.BackgroundTransparency = 1; Lbl.Text = label; Lbl.Font = Enum.Font.GothamBold; Lbl.TextSize = 11
+        Lbl.TextColor3 = Color3.fromRGB(185, 45, 255); Lbl.TextXAlignment = Enum.TextXAlignment.Left
+        local BG = Instance.new("Frame", parent)
+        BG.Size = UDim2.new(1, -40, 0, 40); BG.Position = UDim2.new(0, 20, 0, yPos + 18)
+        BG.BackgroundColor3 = Color3.fromRGB(20, 20, 26); BG.BorderSizePixel = 0
+        Instance.new("UICorner", BG).CornerRadius = UDim.new(0, 8)
+        local St = Instance.new("UIStroke", BG); St.Color = Color3.fromRGB(70, 55, 85); St.Thickness = 1.5
+        local Input = Instance.new("TextBox", BG)
+        Input.Size = UDim2.new(1, -16, 1, 0); Input.Position = UDim2.new(0, 8, 0, 0)
+        Input.BackgroundTransparency = 1; Input.PlaceholderText = placeholder
+        Input.PlaceholderColor3 = Color3.fromRGB(70, 90, 130); Input.Text = ""
+        Input.Font = Enum.Font.GothamBold; Input.TextSize = 13; Input.TextColor3 = Color3.fromRGB(238, 236, 242)
+        Input.ClearTextOnFocus = false
+        if isPassword then Input.TextTransparency = 0; Input.Text = "" end
+        Input.Focused:Connect(function() TweenService:Create(St, TweenInfo.new(0.2), {Color=Color3.fromRGB(185, 45, 255), Thickness=2}):Play() end)
+        Input.FocusLost:Connect(function() TweenService:Create(St, TweenInfo.new(0.2), {Color=Color3.fromRGB(70, 55, 85), Thickness=1.5}):Play() end)
+        return Input, St
+    end
+
+    local UsernameInput, _ = makeInput(LoginFrame, 68,  "PSEUDO",       "Ton pseudo...")
+    local PasswordInput, _ = makeInput(LoginFrame, 130, "MOT DE PASSE", "Ton mot de passe...")
+    local KeyInput, KeyStroke = makeInput(LoginFrame, 192, "CLÉ D'ACCÈS (optionnel si compte existant)", "Ta key ici...")
+
+    local InfoLbl = Instance.new("TextLabel", LoginFrame)
+    InfoLbl.Size = UDim2.new(1, -40, 0, 18); InfoLbl.Position = UDim2.new(0, 20, 0, 256)
+    InfoLbl.BackgroundTransparency = 1; InfoLbl.TextWrapped = true
+    InfoLbl.Text = "Compte existant = connexion sans key  ·  Nouveau = key obligatoire"
+    InfoLbl.Font = Enum.Font.Gotham; InfoLbl.TextSize = 10; InfoLbl.TextColor3 = Color3.fromRGB(80, 110, 170)
+    InfoLbl.TextXAlignment = Enum.TextXAlignment.Center
+    local StatusMsg = Instance.new("TextLabel", LoginFrame)
+    StatusMsg.Size = UDim2.new(1, -40, 0, 18); StatusMsg.Position = UDim2.new(0, 20, 0, 278)
+    StatusMsg.BackgroundTransparency = 1; StatusMsg.Text = ""; StatusMsg.Font = Enum.Font.GothamBold
+    StatusMsg.TextSize = 12; StatusMsg.TextXAlignment = Enum.TextXAlignment.Center
+    local LoginBtn = Instance.new("TextButton", LoginFrame)
+    LoginBtn.Size = UDim2.new(1, -40, 0, 44); LoginBtn.Position = UDim2.new(0, 20, 0, 304)
+    LoginBtn.BackgroundColor3 = Color3.fromRGB(185, 45, 255); LoginBtn.Text = "🔓 SE CONNECTER"
+    LoginBtn.Font = Enum.Font.GothamBold; LoginBtn.TextSize = 14
+    LoginBtn.TextColor3 = Color3.fromRGB(255, 255, 255); LoginBtn.AutoButtonColor = false
+    Instance.new("UICorner", LoginBtn).CornerRadius = UDim.new(0, 8)
+    local RegBtn = Instance.new("TextButton", LoginFrame)
+    RegBtn.Size = UDim2.new(1, -40, 0, 36); RegBtn.Position = UDim2.new(0, 20, 0, 356)
+    RegBtn.BackgroundColor3 = Color3.fromRGB(28, 18, 40); RegBtn.Text = "➕ CRÉER UN COMPTE (key requise)"
+    RegBtn.Font = Enum.Font.GothamBold; RegBtn.TextSize = 12
+    RegBtn.TextColor3 = Color3.fromRGB(185, 45, 255); RegBtn.AutoButtonColor = false
+    Instance.new("UICorner", RegBtn).CornerRadius = UDim.new(0, 8)
+    Instance.new("UIStroke", RegBtn).Color = Color3.fromRGB(185, 45, 255)
+
+    local AdminBtnLogin = Instance.new("TextButton", LoginFrame)
+    AdminBtnLogin.Size = UDim2.new(0, 110, 0, 28); AdminBtnLogin.Position = UDim2.new(1, -130, 1, -42)
+    AdminBtnLogin.BackgroundColor3 = Color3.fromRGB(20, 14, 8); AdminBtnLogin.Text = "👑 Admin"
+    AdminBtnLogin.Font = Enum.Font.GothamBold; AdminBtnLogin.TextSize = 11
+    AdminBtnLogin.TextColor3 = Color3.fromRGB(180, 120, 30); AdminBtnLogin.AutoButtonColor = false; AdminBtnLogin.BorderSizePixel = 0
+    Instance.new("UICorner", AdminBtnLogin).CornerRadius = UDim.new(0, 7)
+    local ABStroke = Instance.new("UIStroke", AdminBtnLogin)
+    ABStroke.Color = Color3.fromRGB(255, 160, 20); ABStroke.Thickness = 1
+    AdminBtnLogin.MouseButton1Click:Connect(openAdminPanel)
+
+    local InfoLabel = Instance.new("TextLabel", LoginFrame)
+    InfoLabel.Size = UDim2.new(1, -150, 0, 16); InfoLabel.Position = UDim2.new(0, 20, 1, -38)
+    InfoLabel.BackgroundTransparency = 1; InfoLabel.Text = "Keys disponibles sur le Discord"
+    InfoLabel.Font = Enum.Font.Gotham; InfoLabel.TextSize = 11
+    InfoLabel.TextColor3 = Color3.fromRGB(80, 110, 170); InfoLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    local function animateShake()
+        for i = 1, 6 do
+            TweenService:Create(LoginFrame, TweenInfo.new(0.05), {
+                Position = UDim2.new(0.5, -235 + (i%2==0 and 8 or -8), 0.5, -270)
+            }):Play()
+            task.wait(0.05)
+        end
+        TweenService:Create(LoginFrame, TweenInfo.new(0.1), {Position = UDim2.new(0.5, -235, 0.5, -270)}):Play()
+    end
+
+    local function finishLogin(username, userData)
+        loggedUsername = username; currentSessionData = userData
+        saveSession({username=username, loginTime=os.time and os.time() or 0})
+        addToWhitelist(username)
+        TweenService:Create(LoginFrame, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+            Size = UDim2.new(0, 0, 0, 0), Position = UDim2.new(0.5, 0, 0.5, 0)
+        }):Play()
+        task.wait(0.5); LoginGui:Destroy(); loginVerified = true; updateRemainingTimeDisplay()
+    end
+
+    local function doLogin()
+        local username = UsernameInput.Text:gsub("%s",""); local password = PasswordInput.Text; local key = KeyInput.Text:gsub("%s","")
+        if username == "" or password == "" then
+            StatusMsg.Text = "❌ Pseudo et mot de passe requis"; StatusMsg.TextColor3 = Color3.fromRGB(220, 80, 80); animateShake(); return
+        end
+        if accountExists(username) then
+            local ok, userData = checkAccount(username, password)
+            if ok then
+                StatusMsg.Text = "✅ Connexion réussie !"; StatusMsg.TextColor3 = Color3.fromRGB(50, 200, 100)
+                if key ~= "" and isKeyValid(key) then pcall(function() writefile(KEY_FILE, key) end) end
+                task.wait(0.3); finishLogin(username, userData)
+            else
+                StatusMsg.Text = "❌ Mot de passe incorrect"; StatusMsg.TextColor3 = Color3.fromRGB(220, 80, 80); animateShake()
+            end
+            return
+        end
+        if key ~= "" and isKeyValid(key) then
+            local userData = saveAccount(username, password, key)
+            pcall(function() writefile(KEY_FILE, key) end)
+            StatusMsg.Text = "✅ Compte créé & connecté !"; StatusMsg.TextColor3 = Color3.fromRGB(50, 200, 100)
+            task.wait(0.3); finishLogin(username, userData); return
+        end
+        StatusMsg.Text = "❌ Compte inconnu. Utilisez une key pour créer un compte."; StatusMsg.TextColor3 = Color3.fromRGB(220, 80, 80); animateShake()
+    end
+
+    local function doRegister()
+        local username = UsernameInput.Text:gsub("%s",""); local password = PasswordInput.Text; local key = KeyInput.Text:gsub("%s","")
+        if username == "" or password == "" then StatusMsg.Text = "❌ Pseudo et mot de passe requis"; StatusMsg.TextColor3 = Color3.fromRGB(220, 80, 80); animateShake(); return end
+        if #username < 3 then StatusMsg.Text = "❌ Pseudo trop court (min 3)"; StatusMsg.TextColor3 = Color3.fromRGB(220, 80, 80); animateShake(); return end
+        if #password < 4 then StatusMsg.Text = "❌ Mot de passe trop court (min 4)"; StatusMsg.TextColor3 = Color3.fromRGB(220, 80, 80); animateShake(); return end
+        if accountExists(username) then StatusMsg.Text = "❌ Ce pseudo est déjà pris !"; StatusMsg.TextColor3 = Color3.fromRGB(220, 80, 80); animateShake(); return end
+        if not isKeyValid(key) then
+            StatusMsg.Text = "❌ Key invalide ou expirée !"; StatusMsg.TextColor3 = Color3.fromRGB(220, 80, 80)
+            TweenService:Create(KeyStroke, TweenInfo.new(0.15), {Color=Color3.fromRGB(220, 40, 40)}):Play()
+            task.delay(0.8, function() TweenService:Create(KeyStroke, TweenInfo.new(0.2), {Color=Color3.fromRGB(70, 55, 85)}):Play() end)
+            animateShake(); return
+        end
+        local userData = saveAccount(username, password, key)
+        pcall(function() writefile(KEY_FILE, key) end)
+        StatusMsg.Text = "✅ Compte créé !"; StatusMsg.TextColor3 = Color3.fromRGB(50, 200, 100)
+        task.wait(0.3); finishLogin(username, userData)
+    end
+
+    LoginBtn.MouseButton1Click:Connect(doLogin)
+    RegBtn.MouseButton1Click:Connect(doRegister)
+    LoginFrame.Size = UDim2.new(0, 0, 0, 0); LoginFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+    TweenService:Create(LoginFrame, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 470, 0, 540), Position = UDim2.new(0.5, -235, 0.5, -270)
+    }):Play()
+    repeat task.wait(0.1) until loginVerified or not LoginGui.Parent
+end
+
+-- ============================================================
+-- AUTO-LOGIN SESSION
+-- ============================================================
+local savedSession = loadSession()
+if savedSession and savedSession.username then
+    local accounts = loadAccounts()
+    local userData  = accounts[savedSession.username:lower()]
+    if userData then
+        loginVerified      = true
+        loggedUsername     = savedSession.username
+        currentSessionData = userData
+        updateRemainingTimeDisplay()
+    end
+end
+if not loginVerified then createLoginScreen() end
+if not loginVerified then return end
+
+-- ============================================================
+-- VARIABLES JEUX
+-- ============================================================
+local player    = Players.LocalPlayer
+local camera    = Workspace.CurrentCamera
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid  = character:WaitForChild("Humanoid")
+local rootpart  = character:WaitForChild("HumanoidRootPart")
+local originalValues = {
+    walkSpeed = humanoid.WalkSpeed,
+    jumpPower = humanoid.JumpPower,
+    fov       = camera.FieldOfView
+}
+
+-- ============================================================
+-- KEYCODES SOURIS SUPPORTÉS
+-- ============================================================
+-- Touches disponibles pour l'aimbot lock (clavier + souris)
+local AVAILABLE_KEYCODES = {
+    -- Clavier
+    {label="F1",   code=Enum.KeyCode.F1},
+    {label="F2",   code=Enum.KeyCode.F2},
+    {label="F3",   code=Enum.KeyCode.F3},
+    {label="F4",   code=Enum.KeyCode.F4},
+    {label="F5",   code=Enum.KeyCode.F5},
+    {label="F6",   code=Enum.KeyCode.F6},
+    {label="E",    code=Enum.KeyCode.E},
+    {label="R",    code=Enum.KeyCode.R},
+    {label="T",    code=Enum.KeyCode.T},
+    {label="Z",    code=Enum.KeyCode.Z},
+    {label="X",    code=Enum.KeyCode.X},
+    {label="C",    code=Enum.KeyCode.C},
+    {label="Q",    code=Enum.KeyCode.Q},
+    {label="LeftAlt",  code=Enum.KeyCode.LeftAlt},
+    {label="RightAlt", code=Enum.KeyCode.RightAlt},
+    {label="CapsLock", code=Enum.KeyCode.CapsLock},
+    -- Souris
+    {label="Clic D",   code=Enum.UserInputType.MouseButton2},
+    {label="Clic M",   code=Enum.UserInputType.MouseButton3},
+    -- Touches souris latérales (boutons 4/5)
+    {label="Souris4",  code=Enum.KeyCode.Unknown, mouseButton=4},
+    {label="Souris5",  code=Enum.KeyCode.Unknown, mouseButton=5},
+}
+
+-- ============================================================
+-- SETTINGS
+-- ============================================================
+local settings = {
+    -- ESP
+    redESP           = false,
+    rainbowESP       = false,
+    espTransparency  = 0.4,
+    espColor         = Color3.fromRGB(255, 0, 0),
+    -- Aimbot
+    aimbot           = false,
+    aimbotLock       = false,
+    aimbotLockKey    = "Clic D",     -- label de la touche
+    aimbotLockIsMouseButton = true,  -- si c'est un bouton souris
+    aimbotLockMouseButtonNum = 2,    -- numéro du bouton (2=droit, 3=milieu, 4/5=côtés)
+    aimbotLockKeyCode = nil,         -- KeyCode si clavier
+    autoShoot        = false,
+    triggerBot       = false,
+    aimbotFOV        = 200,
+    aimbotSmooth     = 3,
+    targetPart       = "Head",
+    showFOV          = true,
+    fovColor         = Color3.fromRGB(30, 120, 255),
+    -- Movement
+    noclip           = false,
+    infiniteJump     = false,
+    speedEnabled     = false,
+    walkSpeed        = 16,
+    fly              = false,
+    flySpeed         = 50,
+    jumpPower        = 50,
+    spinbot          = false,
+    spinSpeed        = 10,
+    -- Visual
+    fullbright       = false,
+    noFog            = false,
+    fovChanger       = false,
+    fovValue         = 70,
+    thirdPerson      = false,
+    -- Others — TOUS les toggles avec keybind individuel
+    antiAFK          = false,
+    minimizeKey      = "RightControl",
+    minimizeKeyCode  = Enum.KeyCode.RightControl,
+    -- Toggles Others avec keybind
+    bindESP          = false,
+    bindESPKey       = Enum.KeyCode.F1,
+    bindAimbot       = false,
+    bindAimbotKey    = Enum.KeyCode.F2,
+    bindSpeed        = false,
+    bindSpeedKey     = Enum.KeyCode.F3,
+    bindFly          = false,
+    bindFlyKey       = Enum.KeyCode.F4,
+    bindNoclip       = false,
+    bindNoclipKey    = Enum.KeyCode.F5,
+    bindInfJump      = false,
+    bindInfJumpKey   = Enum.KeyCode.F6,
+    bindSpinbot      = false,
+    bindSpinbotKey   = Enum.KeyCode.F7,
+    bindFullbright   = false,
+    bindFullbrightKey= Enum.KeyCode.F8,
+    bindNoFog        = false,
+    bindNoFogKey     = Enum.KeyCode.F9,
+    bindThirdPerson  = false,
+    bindThirdPersonKey=Enum.KeyCode.F10,
+    bindAntiAFK      = false,
+    bindAntiAFKKey   = Enum.KeyCode.F11,
+}
+
+local currentTheme = Color3.fromRGB(185, 45, 255)
+local bgDark       = Color3.fromRGB(3, 3, 7)
+local panelDark    = Color3.fromRGB(15, 15, 20)
+local panelSoft    = Color3.fromRGB(24, 24, 31)
+local textMuted    = Color3.fromRGB(155, 150, 165)
+
+-- ============================================================
+-- SAUVEGARDE SETTINGS + ÉTATS
+-- ============================================================
+local function saveSettings()
+    pcall(function()
+        local toSave = {}
+        for k, v in pairs(settings) do
+            if type(v) == "Color3" then toSave[k] = {r=v.R, g=v.G, b=v.B}
+            elseif type(v) == "EnumItem" then toSave[k] = tostring(v)
+            else toSave[k] = v end
+        end
+        writefile(SETTINGS_FILE, HttpService:JSONEncode(toSave))
+    end)
+end
+
+local function loadSettings()
+    if not (isfile and isfile(SETTINGS_FILE)) then return end
+    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(SETTINGS_FILE)) end)
+    if ok and data then
+        for k, v in pairs(data) do
+            if type(v) == "table" and v.r ~= nil then settings[k] = Color3.new(v.r, v.g, v.b)
+            elseif type(v) == "string" and v:find("Enum.KeyCode") then
+                pcall(function() settings[k] = Enum.KeyCode[v:match("Enum%.KeyCode%.(.+)")] end)
+            else settings[k] = v end
+        end
+    end
+end
+
+local function saveStates()
+    pcall(function()
+        local states = {
+            redESP      = settings.redESP,
+            rainbowESP  = settings.rainbowESP,
+            aimbot      = settings.aimbot,
+            aimbotLock  = settings.aimbotLock,
+            triggerBot  = settings.triggerBot,
+            showFOV     = settings.showFOV,
+            noclip      = settings.noclip,
+            infiniteJump= settings.infiniteJump,
+            speedEnabled= settings.speedEnabled,
+            fly         = settings.fly,
+            spinbot     = settings.spinbot,
+            fullbright  = settings.fullbright,
+            noFog       = settings.noFog,
+            fovChanger  = settings.fovChanger,
+            thirdPerson = settings.thirdPerson,
+            antiAFK     = settings.antiAFK,
+        }
+        writefile(STATES_FILE, HttpService:JSONEncode(states))
+    end)
+end
+
+local function loadStates()
+    if not (isfile and isfile(STATES_FILE)) then return {} end
+    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(STATES_FILE)) end)
+    return (ok and data) or {}
+end
+
+-- ============================================================
+-- RUNTIME
+-- ============================================================
+local connections      = {}
+local highlights       = {}
+local lockedTarget     = nil
+local rainbowHue       = 0
+local flyConnection    = nil
+local fovCircle        = nil
+local isAimbotLockHeld = false
+local spinAngle        = 0
+local toggleRegistry   = {}
+
+local function cleanup()
+    for _, c in pairs(connections) do pcall(function() c:Disconnect() end) end
+    for _, h in pairs(highlights)  do pcall(function() h:Destroy() end) end
+    if flyConnection then flyConnection:Disconnect() end
+    if fovCircle then pcall(function() fovCircle:Remove() end) end
+    connections = {}; highlights = {}; lockedTarget = nil
+    if humanoid then humanoid.WalkSpeed = originalValues.walkSpeed; humanoid.JumpPower = originalValues.jumpPower end
+    camera.FieldOfView = originalValues.fov
+end
+
+-- ============================================================
+-- GUI PRINCIPAL
+-- ============================================================
+ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ZNKFusion"; ScreenGui.ResetOnSpawn = false; ScreenGui.DisplayOrder = 999999
+pcall(function()
+    if gethui then ScreenGui.Parent = gethui()
+    elseif syn and syn.protect_gui then syn.protect_gui(ScreenGui); ScreenGui.Parent = CoreGui
+    else ScreenGui.Parent = CoreGui end
+end)
+
+local MAIN_W = 660; local MAIN_H = 490
+local SIDEBAR_W = 132; local TITLEBAR_H = 58; local PAD = 8
+local CONTENT_X = SIDEBAR_W + PAD * 2 + PAD
+local CONTENT_W = MAIN_W - CONTENT_X - PAD
+local CONTENT_H = MAIN_H - TITLEBAR_H - PAD * 2
+
+local Main = Instance.new("Frame", ScreenGui)
+Main.Size = UDim2.new(0, MAIN_W, 0, MAIN_H)
+Main.Position = UDim2.new(0.5, -MAIN_W/2, 0.5, -MAIN_H/2)
+Main.BackgroundColor3 = bgDark; Main.BorderSizePixel = 0
+Main.Active = true; Main.Draggable = true; Main.ClipsDescendants = true
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+local MainStroke = Instance.new("UIStroke", Main)
+MainStroke.Color = currentTheme; MainStroke.Thickness = 1.8; MainStroke.Transparency = 0.15
+
+-- TITLEBAR
+local TitleBar = Instance.new("Frame", Main)
+TitleBar.Size = UDim2.new(1, 0, 0, TITLEBAR_H); TitleBar.BackgroundColor3 = bgDark; TitleBar.BorderSizePixel = 0
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 12)
+local TFix = Instance.new("Frame", TitleBar)
+TFix.Size = UDim2.new(1, 0, 0, 28); TFix.Position = UDim2.new(0, 0, 1, -28)
+TFix.BackgroundColor3 = bgDark; TFix.BorderSizePixel = 0
+local TGrad = Instance.new("UIGradient", TitleBar)
+TGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(8, 8, 12)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 8, 28)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(70, 18, 100))
+}); TGrad.Rotation = 0
+
+local LogoBG = Instance.new("Frame", TitleBar)
+LogoBG.Size = UDim2.new(0, 40, 0, 40); LogoBG.Position = UDim2.new(0, 12, 0.5, -20)
+LogoBG.BackgroundColor3 = Color3.fromRGB(155, 38, 255); LogoBG.BorderSizePixel = 0
+Instance.new("UICorner", LogoBG).CornerRadius = UDim.new(0, 10)
+local LogoText = Instance.new("TextLabel", LogoBG)
+LogoText.Size = UDim2.new(1, 0, 1, 0); LogoText.BackgroundTransparency = 1
+LogoText.Text = "⚡"; LogoText.Font = Enum.Font.GothamBold; LogoText.TextSize = 22
+LogoText.TextColor3 = Color3.fromRGB(255, 255, 255)
+
+local TitleLbl = Instance.new("TextLabel", TitleBar)
+TitleLbl.Size = UDim2.new(0, 220, 0, 24); TitleLbl.Position = UDim2.new(0, 62, 0, 7)
+TitleLbl.BackgroundTransparency = 1; TitleLbl.Text = "ZNK HUB"
+TitleLbl.Font = Enum.Font.GothamBold; TitleLbl.TextSize = 20
+TitleLbl.TextColor3 = Color3.fromRGB(255, 255, 255); TitleLbl.TextXAlignment = Enum.TextXAlignment.Left
+local UsernameLbl = Instance.new("TextLabel", TitleBar)
+UsernameLbl.Size = UDim2.new(0, 240, 0, 16); UsernameLbl.Position = UDim2.new(0, 63, 0, 34)
+UsernameLbl.BackgroundTransparency = 1; UsernameLbl.Text = "👤 "..loggedUsername.." · "..currentKeyRemaining
+UsernameLbl.Font = Enum.Font.GothamBold; UsernameLbl.TextSize = 11
+UsernameLbl.TextColor3 = currentTheme; UsernameLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+local AdminBtn = Instance.new("TextButton", TitleBar)
+AdminBtn.Size = UDim2.new(0, 68, 0, 28); AdminBtn.Position = UDim2.new(1, -290, 0.5, -14)
+AdminBtn.BackgroundColor3 = Color3.fromRGB(20, 14, 8); AdminBtn.Text = "👑 Admin"
+AdminBtn.Font = Enum.Font.GothamBold; AdminBtn.TextSize = 11
+AdminBtn.TextColor3 = Color3.fromRGB(180, 120, 30); AdminBtn.AutoButtonColor = false; AdminBtn.BorderSizePixel = 0
+Instance.new("UICorner", AdminBtn).CornerRadius = UDim.new(0, 7)
+Instance.new("UIStroke", AdminBtn).Color = Color3.fromRGB(255, 160, 20)
+AdminBtn.MouseButton1Click:Connect(openAdminPanel)
+
+local MinBtn = Instance.new("TextButton", TitleBar)
+MinBtn.Size = UDim2.new(0, 32, 0, 32); MinBtn.Position = UDim2.new(1, -80, 0.5, -16)
+MinBtn.BackgroundColor3 = panelSoft; MinBtn.Text = "─"; MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 16; MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255); MinBtn.AutoButtonColor = false
+Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 7)
+local CloseBtn = Instance.new("TextButton", TitleBar)
+CloseBtn.Size = UDim2.new(0, 32, 0, 32); CloseBtn.Position = UDim2.new(1, -44, 0.5, -16)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(40, 20, 28); CloseBtn.Text = "✕"
+CloseBtn.Font = Enum.Font.GothamBold; CloseBtn.TextSize = 14
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255); CloseBtn.AutoButtonColor = false
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 7)
+
+-- SIDEBAR
+local Sidebar = Instance.new("Frame", Main)
+Sidebar.Size = UDim2.new(0, SIDEBAR_W, 0, MAIN_H - TITLEBAR_H - PAD*3 - 68)
+Sidebar.Position = UDim2.new(0, PAD, 0, TITLEBAR_H + PAD)
+Sidebar.BackgroundColor3 = panelDark; Sidebar.BorderSizePixel = 0
+Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 10)
+Instance.new("UIStroke", Sidebar).Color = Color3.fromRGB(50, 45, 60)
+local SideList = Instance.new("UIListLayout", Sidebar)
+SideList.Padding = UDim.new(0, 6); SideList.SortOrder = Enum.SortOrder.LayoutOrder
+SideList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+local SidePad = Instance.new("UIPadding", Sidebar)
+SidePad.PaddingTop = UDim.new(0, 10); SidePad.PaddingLeft = UDim.new(0, 6); SidePad.PaddingRight = UDim.new(0, 6)
+
+-- BLOC BAS SIDEBAR
+local SideBottom = Instance.new("Frame", Main)
+SideBottom.Size = UDim2.new(0, SIDEBAR_W, 0, 68)
+SideBottom.Position = UDim2.new(0, PAD, 1, -68 - PAD)
+SideBottom.BackgroundColor3 = panelDark; SideBottom.BorderSizePixel = 0
+Instance.new("UICorner", SideBottom).CornerRadius = UDim.new(0, 10)
+local SBStroke = Instance.new("UIStroke", SideBottom)
+SBStroke.Color = Color3.fromRGB(60, 50, 75); SBStroke.Thickness = 1
+
+local TimerIcon = Instance.new("TextLabel", SideBottom)
+TimerIcon.Size = UDim2.new(0, 20, 0, 20); TimerIcon.Position = UDim2.new(0, 8, 0, 6)
+TimerIcon.BackgroundTransparency = 1; TimerIcon.Text = "⏱"
+TimerIcon.Font = Enum.Font.GothamBold; TimerIcon.TextSize = 14; TimerIcon.TextColor3 = Color3.fromRGB(255, 200, 80)
+local TimerLbl = Instance.new("TextLabel", SideBottom)
+TimerLbl.Size = UDim2.new(1, -32, 0, 20); TimerLbl.Position = UDim2.new(0, 28, 0, 6)
+TimerLbl.BackgroundTransparency = 1
+TimerLbl.Text = currentKeyRemaining ~= "" and currentKeyRemaining or "Illimitée"
+TimerLbl.Font = Enum.Font.GothamBold; TimerLbl.TextSize = 11
+TimerLbl.TextColor3 = Color3.fromRGB(255, 200, 80); TimerLbl.TextXAlignment = Enum.TextXAlignment.Left
+TimerLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+local StatusDot = Instance.new("Frame", SideBottom)
+StatusDot.Size = UDim2.new(0, 7, 0, 7); StatusDot.Position = UDim2.new(0, 9, 0, 40)
+StatusDot.BackgroundColor3 = Color3.fromRGB(0, 214, 110); StatusDot.BorderSizePixel = 0
+Instance.new("UICorner", StatusDot).CornerRadius = UDim.new(1, 0)
+local StatusLbl = Instance.new("TextLabel", SideBottom)
+StatusLbl.Size = UDim2.new(1, -20, 0, 16); StatusLbl.Position = UDim2.new(0, 20, 0, 36)
+StatusLbl.BackgroundTransparency = 1; StatusLbl.Text = "Opérationnel"
+StatusLbl.Font = Enum.Font.GothamBold; StatusLbl.TextSize = 10
+StatusLbl.TextColor3 = Color3.fromRGB(0, 214, 110); StatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+local StatusUser = Instance.new("TextLabel", SideBottom)
+StatusUser.Size = UDim2.new(1, -8, 0, 14); StatusUser.Position = UDim2.new(0, 4, 0, 54)
+StatusUser.BackgroundTransparency = 1; StatusUser.Text = loggedUsername
+StatusUser.Font = Enum.Font.GothamBold; StatusUser.TextSize = 9
+StatusUser.TextColor3 = Color3.fromRGB(100, 90, 120); StatusUser.TextXAlignment = Enum.TextXAlignment.Center
+
+-- CONTENT
+local Content = Instance.new("ScrollingFrame", Main)
+Content.Size = UDim2.new(0, CONTENT_W, 0, CONTENT_H)
+Content.Position = UDim2.new(0, CONTENT_X, 0, TITLEBAR_H + PAD)
+Content.BackgroundColor3 = panelDark; Content.BorderSizePixel = 0
+Content.ScrollBarThickness = 4; Content.ScrollBarImageColor3 = currentTheme
+Content.CanvasSize = UDim2.new(0, 0, 0, 0)
+Instance.new("UICorner", Content).CornerRadius = UDim.new(0, 10)
+local ContentList = Instance.new("UIListLayout", Content)
+ContentList.Padding = UDim.new(0, 8); ContentList.SortOrder = Enum.SortOrder.LayoutOrder
+local ContentPad = Instance.new("UIPadding", Content)
+ContentPad.PaddingTop = UDim.new(0, 8); ContentPad.PaddingLeft = UDim.new(0, 8); ContentPad.PaddingRight = UDim.new(0, 8)
+ContentList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    Content.CanvasSize = UDim2.new(0, 0, 0, ContentList.AbsoluteContentSize.Y + 16)
+end)
+
+-- Logo réduit (minimisé)
+local LogoButton = Instance.new("TextButton", ScreenGui)
+LogoButton.Name = "ZNKHiddenLogo"; LogoButton.Size = UDim2.new(0, 110, 0, 36)
+LogoButton.Position = UDim2.new(0.5, -55, 0, 12)
+LogoButton.BackgroundColor3 = Color3.fromRGB(140, 38, 220); LogoButton.BackgroundTransparency = 0.1
+LogoButton.BorderSizePixel = 0; LogoButton.Visible = false; LogoButton.Active = true
+LogoButton.Draggable = true; LogoButton.AutoButtonColor = false
+LogoButton.Text = "⚡ ZNK HUB"; LogoButton.Font = Enum.Font.GothamBold
+LogoButton.TextSize = 13; LogoButton.TextColor3 = Color3.fromRGB(255, 255, 255); LogoButton.ZIndex = 50
+Instance.new("UICorner", LogoButton).CornerRadius = UDim.new(0, 8)
+
+-- ============================================================
+-- MINIMIZE
+-- ============================================================
+local function toggleMinimize()
+    isMinimized = not isMinimized
+    if isMinimized then
+        saveStates()
+        TweenService:Create(Main, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+            Size = UDim2.new(0, 0, 0, 0), Position = UDim2.new(0.5, 0, 0.5, 0)
+        }):Play()
+        task.delay(0.3, function() Main.Visible = false; LogoButton.Visible = true end)
+    else
+        Main.Visible = true; LogoButton.Visible = false
+        Main.Size = UDim2.new(0, 0, 0, 0); Main.Position = UDim2.new(0.5, 0, 0.5, 0)
+        TweenService:Create(Main, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.new(0, MAIN_W, 0, MAIN_H),
+            Position = UDim2.new(0.5, -MAIN_W/2, 0.5, -MAIN_H/2)
+        }):Play()
+    end
+end
+MinBtn.MouseButton1Click:Connect(toggleMinimize)
+LogoButton.MouseButton1Click:Connect(toggleMinimize)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    saveSettings(); saveStates(); cleanup()
+    if fovCircle then pcall(function() fovCircle:Remove() end) end
+    ScreenGui:Destroy(); notify("ZNK Hub", "Fermé & sauvegardé !", 2)
+end)
+
+-- ============================================================
+-- ONGLETS
+-- ============================================================
+local tabs = {
+    {name="Wallhack",  icon="👁"},
+    {name="Aimbot",    icon="🎯"},
+    {name="Movement",  icon="🏃"},
+    {name="Visual",    icon="✨"},
+    {name="Actions",   icon="⚡"},
+    {name="Others",    icon="⚙️"},
+}
+local tabPages = {}; local tabButtons = {}; local currentTab = "Wallhack"
+
+for _, tab in ipairs(tabs) do
+    tabPages[tab.name] = {}
+    local Btn = Instance.new("TextButton", Sidebar)
+    Btn.Size = UDim2.new(1, 0, 0, 44); Btn.BackgroundColor3 = panelSoft
+    Btn.Text = ""; Btn.AutoButtonColor = false; Btn.BorderSizePixel = 0
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 8)
+    local BtnIcon = Instance.new("TextLabel", Btn)
+    BtnIcon.Size = UDim2.new(1, 0, 0, 20); BtnIcon.Position = UDim2.new(0, 0, 0, 5)
+    BtnIcon.BackgroundTransparency = 1; BtnIcon.Text = tab.icon
+    BtnIcon.Font = Enum.Font.GothamBold; BtnIcon.TextSize = 16; BtnIcon.TextColor3 = textMuted
+    local BtnLabel = Instance.new("TextLabel", Btn)
+    BtnLabel.Size = UDim2.new(1, 0, 0, 14); BtnLabel.Position = UDim2.new(0, 0, 0, 26)
+    BtnLabel.BackgroundTransparency = 1; BtnLabel.Text = tab.name
+    BtnLabel.Font = Enum.Font.GothamBold; BtnLabel.TextSize = 10; BtnLabel.TextColor3 = textMuted
+    local ActiveBar = Instance.new("Frame", Btn)
+    ActiveBar.Size = UDim2.new(0, 3, 0.7, 0); ActiveBar.Position = UDim2.new(0, 0, 0.15, 0)
+    ActiveBar.BackgroundColor3 = currentTheme; ActiveBar.BorderSizePixel = 0; ActiveBar.Visible = false
+    Instance.new("UICorner", ActiveBar).CornerRadius = UDim.new(1, 0)
+    tabButtons[tab.name] = {btn=Btn, bar=ActiveBar, icon=BtnIcon, label=BtnLabel}
+    Btn.MouseButton1Click:Connect(function()
+        currentTab = tab.name
+        for _, page in pairs(tabPages) do for _, elem in pairs(page) do elem.Visible = false end end
+        for _, elem in pairs(tabPages[tab.name]) do elem.Visible = true end
+        Content.CanvasPosition = Vector2.new(0, 0)
+        for tname, tbtn in pairs(tabButtons) do
+            local active = (tname == tab.name)
+            TweenService:Create(tbtn.btn, TweenInfo.new(0.2), {
+                BackgroundColor3 = active and Color3.fromRGB(42, 18, 58) or panelSoft
+            }):Play()
+            tbtn.bar.Visible = active
+            tbtn.icon.TextColor3 = active and Color3.fromRGB(255, 255, 255) or textMuted
+            tbtn.label.TextColor3 = active and currentTheme or textMuted
+        end
+    end)
+end
+tabButtons["Wallhack"].btn.BackgroundColor3 = Color3.fromRGB(42, 18, 58)
+tabButtons["Wallhack"].bar.Visible = true
+tabButtons["Wallhack"].icon.TextColor3 = Color3.fromRGB(255, 255, 255)
+tabButtons["Wallhack"].label.TextColor3 = currentTheme
+
+-- ============================================================
+-- FONCTIONS UI
+-- ============================================================
+local function createSectionTitle(tabName, text)
+    local F = Instance.new("Frame", Content)
+    F.Size = UDim2.new(1, 0, 0, 28); F.BackgroundTransparency = 1; F.Visible = (tabName == currentTab)
+    table.insert(tabPages[tabName], F)
+    local L = Instance.new("TextLabel", F)
+    L.Size = UDim2.new(1, -8, 1, 0); L.Position = UDim2.new(0, 4, 0, 0)
+    L.BackgroundTransparency = 1; L.Text = text; L.Font = Enum.Font.GothamBold
+    L.TextSize = 12; L.TextColor3 = currentTheme; L.TextXAlignment = Enum.TextXAlignment.Left
+    local Sep = Instance.new("Frame", F)
+    Sep.Size = UDim2.new(1, -8, 0, 1); Sep.Position = UDim2.new(0, 4, 1, -1)
+    Sep.BackgroundColor3 = currentTheme; Sep.BackgroundTransparency = 0.7; Sep.BorderSizePixel = 0
+    return F
+end
+
+local function createToggle(tabName, textKey, default, callback)
+    local Toggle = Instance.new("Frame", Content)
+    Toggle.Size = UDim2.new(1, 0, 0, 42); Toggle.BackgroundColor3 = panelSoft
+    Toggle.BorderSizePixel = 0; Toggle.Visible = (tabName == currentTab)
+    Instance.new("UICorner", Toggle).CornerRadius = UDim.new(0, 8)
+    Instance.new("UIStroke", Toggle).Color = Color3.fromRGB(50, 45, 60)
+    table.insert(tabPages[tabName], Toggle)
+    local Label = Instance.new("TextLabel", Toggle)
+    Label.Size = UDim2.new(1, -60, 1, 0); Label.Position = UDim2.new(0, 12, 0, 0)
+    Label.BackgroundTransparency = 1; Label.Text = textKey; Label.Font = Enum.Font.GothamBold
+    Label.TextSize = 13; Label.TextColor3 = Color3.fromRGB(238, 236, 242); Label.TextXAlignment = Enum.TextXAlignment.Left
+    local Btn = Instance.new("TextButton", Toggle)
+    Btn.Size = UDim2.new(0, 44, 0, 22); Btn.Position = UDim2.new(1, -52, 0.5, -11)
+    Btn.BackgroundColor3 = default and currentTheme or Color3.fromRGB(45, 45, 55)
+    Btn.Text = ""; Btn.AutoButtonColor = false
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(1, 0)
+    local Circle = Instance.new("Frame", Btn)
+    Circle.Size = UDim2.new(0, 17, 0, 17)
+    Circle.Position = default and UDim2.new(1, -19, 0.5, -8.5) or UDim2.new(0, 2, 0.5, -8.5)
+    Circle.BackgroundColor3 = Color3.fromRGB(255, 255, 255); Circle.BorderSizePixel = 0
+    Instance.new("UICorner", Circle).CornerRadius = UDim.new(1, 0)
+    local enabled = default
+    local record = {enabled=enabled, button=Btn, circle=Circle, label=Label, callback=callback}
+    toggleRegistry[#toggleRegistry+1] = record
+    local function setToggle(val)
+        enabled = val; record.enabled = val
+        TweenService:Create(Btn, TweenInfo.new(0.2), {
+            BackgroundColor3 = val and currentTheme or Color3.fromRGB(45, 45, 55)
+        }):Play()
+        TweenService:Create(Circle, TweenInfo.new(0.2), {
+            Position = val and UDim2.new(1, -19, 0.5, -8.5) or UDim2.new(0, 2, 0.5, -8.5)
+        }):Play()
+    end
+    Btn.MouseButton1Click:Connect(function()
+        setToggle(not enabled)
+        if callback then callback(enabled) end; saveSettings()
+    end)
+    record.setToggle = setToggle
+    return Toggle, record
+end
+
+local function createSlider(tabName, textKey, min, max, default, suffix, callback)
+    local S = Instance.new("Frame", Content)
+    S.Size = UDim2.new(1, 0, 0, 58); S.BackgroundColor3 = panelSoft
+    S.BorderSizePixel = 0; S.Visible = (tabName == currentTab)
+    Instance.new("UICorner", S).CornerRadius = UDim.new(0, 8)
+    table.insert(tabPages[tabName], S)
+    local Lbl = Instance.new("TextLabel", S)
+    Lbl.Size = UDim2.new(0.65, 0, 0, 18); Lbl.Position = UDim2.new(0, 12, 0, 8)
+    Lbl.BackgroundTransparency = 1; Lbl.Text = textKey; Lbl.Font = Enum.Font.GothamBold
+    Lbl.TextSize = 13; Lbl.TextColor3 = Color3.fromRGB(238, 236, 242); Lbl.TextXAlignment = Enum.TextXAlignment.Left
+    local ValBox = Instance.new("TextLabel", S)
+    ValBox.Size = UDim2.new(0, 55, 0, 18); ValBox.Position = UDim2.new(1, -63, 0, 8)
+    ValBox.BackgroundColor3 = Color3.fromRGB(34, 26, 43)
+    ValBox.Text = tostring(default)..(suffix or ""); ValBox.Font = Enum.Font.GothamBold
+    ValBox.TextSize = 11; ValBox.TextColor3 = currentTheme
+    Instance.new("UICorner", ValBox).CornerRadius = UDim.new(0, 5)
+    local Track = Instance.new("Frame", S)
+    Track.Size = UDim2.new(1, -24, 0, 5); Track.Position = UDim2.new(0, 12, 1, -16)
+    Track.BackgroundColor3 = Color3.fromRGB(48, 45, 58); Track.BorderSizePixel = 0
+    Instance.new("UICorner", Track).CornerRadius = UDim.new(1, 0)
+    local Fill = Instance.new("Frame", Track)
+    Fill.Size = UDim2.new((default-min)/(max-min), 0, 1, 0); Fill.BackgroundColor3 = currentTheme; Fill.BorderSizePixel = 0
+    Instance.new("UICorner", Fill).CornerRadius = UDim.new(1, 0)
+    local Knob = Instance.new("Frame", Track)
+    Knob.Size = UDim2.new(0, 14, 0, 14); Knob.Position = UDim2.new((default-min)/(max-min), -7, 0.5, -7)
+    Knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255); Knob.BorderSizePixel = 0
+    Instance.new("UICorner", Knob).CornerRadius = UDim.new(1, 0)
+    local dragging = false; local val = default
+    Track.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+            local rel = (inp.Position.X - Track.AbsolutePosition.X) / Track.AbsoluteSize.X
+            rel = math.clamp(rel, 0, 1)
+            val = math.floor(min + rel * (max - min))
+            Fill.Size = UDim2.new(rel, 0, 1, 0); Knob.Position = UDim2.new(rel, -7, 0.5, -7)
+            ValBox.Text = tostring(val)..(suffix or "")
+            if callback then callback(val) end
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false; saveSettings()
+        end
+    end)
+    return S
+end
+
+local function createDropdown(tabName, textKey, options, default, callback)
+    local D = Instance.new("Frame", Content)
+    D.Size = UDim2.new(1, 0, 0, 42); D.BackgroundColor3 = panelSoft
+    D.BorderSizePixel = 0; D.Visible = (tabName == currentTab); D.ClipsDescendants = false
+    Instance.new("UICorner", D).CornerRadius = UDim.new(0, 8)
+    table.insert(tabPages[tabName], D)
+    local Lbl = Instance.new("TextLabel", D)
+    Lbl.Size = UDim2.new(0.5, 0, 1, 0); Lbl.Position = UDim2.new(0, 12, 0, 0)
+    Lbl.BackgroundTransparency = 1; Lbl.Text = textKey; Lbl.Font = Enum.Font.GothamBold
+    Lbl.TextSize = 13; Lbl.TextColor3 = Color3.fromRGB(238, 236, 242); Lbl.TextXAlignment = Enum.TextXAlignment.Left
+    local SelBtn = Instance.new("TextButton", D)
+    SelBtn.Size = UDim2.new(0, 120, 0, 28); SelBtn.Position = UDim2.new(1, -128, 0.5, -14)
+    SelBtn.BackgroundColor3 = Color3.fromRGB(34, 26, 43); SelBtn.Text = default.." ▾"
+    SelBtn.Font = Enum.Font.GothamBold; SelBtn.TextSize = 12; SelBtn.TextColor3 = currentTheme
+    SelBtn.AutoButtonColor = false
+    Instance.new("UICorner", SelBtn).CornerRadius = UDim.new(0, 6)
+    local DropFrame = Instance.new("Frame", D)
+    DropFrame.Size = UDim2.new(0, 120, 0, #options*28); DropFrame.Position = UDim2.new(1, -128, 1, 4)
+    DropFrame.BackgroundColor3 = Color3.fromRGB(24, 20, 32); DropFrame.BorderSizePixel = 0
+    DropFrame.Visible = false; DropFrame.ZIndex = 99
+    Instance.new("UICorner", DropFrame).CornerRadius = UDim.new(0, 6)
+    local DLayout = Instance.new("UIListLayout", DropFrame)
+    DLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    for _, opt in ipairs(options) do
+        local OBtn = Instance.new("TextButton", DropFrame)
+        OBtn.Size = UDim2.new(1, 0, 0, 28); OBtn.BackgroundTransparency = 1
+        OBtn.Text = opt; OBtn.Font = Enum.Font.GothamBold; OBtn.TextSize = 12
+        OBtn.TextColor3 = Color3.fromRGB(200, 195, 215); OBtn.ZIndex = 100
+        OBtn.MouseButton1Click:Connect(function()
+            SelBtn.Text = opt.." ▾"; DropFrame.Visible = false
+            if callback then callback(opt) end; saveSettings()
+        end)
+        OBtn.MouseEnter:Connect(function() OBtn.BackgroundTransparency = 0.7; OBtn.BackgroundColor3 = currentTheme end)
+        OBtn.MouseLeave:Connect(function() OBtn.BackgroundTransparency = 1 end)
+    end
+    SelBtn.MouseButton1Click:Connect(function() DropFrame.Visible = not DropFrame.Visible end)
+    return D
+end
+
+local function createColorPicker(tabName, textKey, default, callback)
+    local CP = Instance.new("Frame", Content)
+    CP.Size = UDim2.new(1, 0, 0, 42); CP.BackgroundColor3 = panelSoft
+    CP.BorderSizePixel = 0; CP.Visible = (tabName == currentTab)
+    Instance.new("UICorner", CP).CornerRadius = UDim.new(0, 8)
+    table.insert(tabPages[tabName], CP)
+    local CL = Instance.new("TextLabel", CP)
+    CL.Size = UDim2.new(0.6, 0, 1, 0); CL.Position = UDim2.new(0, 12, 0, 0)
+    CL.BackgroundTransparency = 1; CL.Text = textKey; CL.Font = Enum.Font.GothamBold
+    CL.TextSize = 13; CL.TextColor3 = Color3.fromRGB(238, 236, 242); CL.TextXAlignment = Enum.TextXAlignment.Left
+    local Swatch = Instance.new("Frame", CP)
+    Swatch.Size = UDim2.new(0, 28, 0, 28); Swatch.Position = UDim2.new(1, -40, 0.5, -14)
+    Swatch.BackgroundColor3 = default; Swatch.BorderSizePixel = 0
+    Instance.new("UICorner", Swatch).CornerRadius = UDim.new(0, 7)
+    Instance.new("UIStroke", Swatch).Color = Color3.fromRGB(80, 70, 100)
+    return CP
+end
+
+-- ============================================================
+-- KEYBIND PICKER POUR OTHERS
+-- ============================================================
+local function createKeybindRow(parent, tabName, labelText, currentKeyLabel, onKeyChanged)
+    local KBRow = Instance.new("Frame", Content)
+    KBRow.Size = UDim2.new(1, 0, 0, 42); KBRow.BackgroundColor3 = panelSoft
+    KBRow.BorderSizePixel = 0; KBRow.Visible = (tabName == currentTab)
+    Instance.new("UICorner", KBRow).CornerRadius = UDim.new(0, 8)
+    Instance.new("UIStroke", KBRow).Color = Color3.fromRGB(50, 45, 60)
+    table.insert(tabPages[tabName], KBRow)
+
+    local KBLabel = Instance.new("TextLabel", KBRow)
+    KBLabel.Size = UDim2.new(0.45, 0, 1, 0); KBLabel.Position = UDim2.new(0, 12, 0, 0)
+    KBLabel.BackgroundTransparency = 1; KBLabel.Text = labelText
+    KBLabel.Font = Enum.Font.GothamBold; KBLabel.TextSize = 11
+    KBLabel.TextColor3 = Color3.fromRGB(155, 150, 165); KBLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    local KBBtn = Instance.new("TextButton", KBRow)
+    KBBtn.Size = UDim2.new(0, 110, 0, 28); KBBtn.Position = UDim2.new(1, -118, 0.5, -14)
+    KBBtn.BackgroundColor3 = Color3.fromRGB(34, 26, 43); KBBtn.Text = currentKeyLabel
+    KBBtn.Font = Enum.Font.GothamBold; KBBtn.TextSize = 11; KBBtn.TextColor3 = currentTheme
+    KBBtn.AutoButtonColor = false; KBBtn.BorderSizePixel = 0
+    Instance.new("UICorner", KBBtn).CornerRadius = UDim.new(0, 6)
+    Instance.new("UIStroke", KBBtn).Color = Color3.fromRGB(80, 60, 120)
+
+    local listening = false
+    KBBtn.MouseButton1Click:Connect(function()
+        if listening then return end
+        listening = true; KBBtn.Text = "Appuie..."
+        KBBtn.BackgroundColor3 = Color3.fromRGB(60, 40, 80)
+        local conn; conn = UserInputService.InputBegan:Connect(function(inp, gp)
+            if gp then return end
+            local keyName = tostring(inp.KeyCode):gsub("Enum.KeyCode.", "")
+            if inp.KeyCode ~= Enum.KeyCode.Unknown then
+                KBBtn.Text = keyName
+                KBBtn.BackgroundColor3 = Color3.fromRGB(34, 26, 43)
+                if onKeyChanged then onKeyChanged(inp.KeyCode, keyName) end
+            end
+            listening = false; conn:Disconnect(); saveSettings()
+        end)
+    end)
+
+    return KBRow, KBBtn
+end
+
+-- ============================================================
+-- KEYBIND PICKER POUR AIMBOT LOCK (clavier + souris + boutons côté)
+-- ============================================================
+local function createAimbotLockKeyPicker(tabName)
+    local KBRow = Instance.new("Frame", Content)
+    KBRow.Size = UDim2.new(1, 0, 0, 42); KBRow.BackgroundColor3 = panelSoft
+    KBRow.BorderSizePixel = 0; KBRow.Visible = (tabName == currentTab)
+    Instance.new("UICorner", KBRow).CornerRadius = UDim.new(0, 8)
+    Instance.new("UIStroke", KBRow).Color = Color3.fromRGB(50, 45, 60)
+    table.insert(tabPages[tabName], KBRow)
+
+    local KBLabel = Instance.new("TextLabel", KBRow)
+    KBLabel.Size = UDim2.new(0.45, 0, 1, 0); KBLabel.Position = UDim2.new(0, 12, 0, 0)
+    KBLabel.BackgroundTransparency = 1; KBLabel.Text = "Touche Lock :"
+    KBLabel.Font = Enum.Font.GothamBold; KBLabel.TextSize = 11
+    KBLabel.TextColor3 = Color3.fromRGB(155, 150, 165); KBLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    local KBBtn = Instance.new("TextButton", KBRow)
+    KBBtn.Size = UDim2.new(0, 110, 0, 28); KBBtn.Position = UDim2.new(1, -118, 0.5, -14)
+    KBBtn.BackgroundColor3 = Color3.fromRGB(34, 26, 43); KBBtn.Text = settings.aimbotLockKey or "Clic D"
+    KBBtn.Font = Enum.Font.GothamBold; KBBtn.TextSize = 11; KBBtn.TextColor3 = currentTheme
+    KBBtn.AutoButtonColor = false; KBBtn.BorderSizePixel = 0
+    Instance.new("UICorner", KBBtn).CornerRadius = UDim.new(0, 6)
+    Instance.new("UIStroke", KBBtn).Color = Color3.fromRGB(80, 60, 120)
+
+    -- Droplist des touches disponibles
+    local DropOpen = false
+    local DropFrame = Instance.new("ScrollingFrame", ScreenGui)
+    DropFrame.Size = UDim2.new(0, 130, 0, math.min(#AVAILABLE_KEYCODES * 26, 200))
+    DropFrame.BackgroundColor3 = Color3.fromRGB(24, 20, 32); DropFrame.BorderSizePixel = 0
+    DropFrame.ScrollBarThickness = 3; DropFrame.CanvasSize = UDim2.new(0, 0, 0, #AVAILABLE_KEYCODES * 26)
+    DropFrame.Visible = false; DropFrame.ZIndex = 200
+    Instance.new("UICorner", DropFrame).CornerRadius = UDim.new(0, 6)
+    Instance.new("UIStroke", DropFrame).Color = currentTheme
+    local DLayout2 = Instance.new("UIListLayout", DropFrame)
+    DLayout2.SortOrder = Enum.SortOrder.LayoutOrder
+
+    for _, kopt in ipairs(AVAILABLE_KEYCODES) do
+        local OBtn = Instance.new("TextButton", DropFrame)
+        OBtn.Size = UDim2.new(1, 0, 0, 26); OBtn.BackgroundTransparency = 1
+        OBtn.Text = kopt.label; OBtn.Font = Enum.Font.GothamBold; OBtn.TextSize = 11
+        OBtn.TextColor3 = Color3.fromRGB(200, 195, 215); OBtn.ZIndex = 201
+        OBtn.MouseButton1Click:Connect(function()
+            settings.aimbotLockKey = kopt.label
+            if kopt.mouseButton then
+                settings.aimbotLockIsMouseButton = true
+                settings.aimbotLockMouseButtonNum = kopt.mouseButton
+                settings.aimbotLockKeyCode = nil
+            elseif type(kopt.code) == "userdata" and tostring(kopt.code):find("UserInputType") then
+                -- bouton souris standard
+                settings.aimbotLockIsMouseButton = true
+                settings.aimbotLockMouseButtonNum = kopt.code == Enum.UserInputType.MouseButton2 and 2 or 3
+                settings.aimbotLockKeyCode = nil
+            else
+                settings.aimbotLockIsMouseButton = false
+                settings.aimbotLockKeyCode = kopt.code
+                settings.aimbotLockMouseButtonNum = nil
+            end
+            KBBtn.Text = kopt.label
+            DropFrame.Visible = false; DropOpen = false
+            saveSettings()
+        end)
+        OBtn.MouseEnter:Connect(function() OBtn.BackgroundTransparency = 0.6; OBtn.BackgroundColor3 = currentTheme end)
+        OBtn.MouseLeave:Connect(function() OBtn.BackgroundTransparency = 1 end)
+    end
+
+    KBBtn.MouseButton1Click:Connect(function()
+        DropOpen = not DropOpen
+        if DropOpen then
+            local absPos = KBBtn.AbsolutePosition
+            local absSize = KBBtn.AbsoluteSize
+            DropFrame.Position = UDim2.new(0, absPos.X, 0, absPos.Y + absSize.Y + 4)
+            DropFrame.Visible = true
+        else
+            DropFrame.Visible = false
+        end
+    end)
+
+    -- Fermer si on clique ailleurs
+    UserInputService.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 and DropOpen then
+            task.wait(0.05)
+            if DropFrame.Visible then DropFrame.Visible = false; DropOpen = false end
+        end
+    end)
+
+    return KBRow, KBBtn
+end
+
+-- ============================================================
+-- DÉTECTION TOUCHE AIMBOT LOCK
+-- ============================================================
+local function isAimbotLockPressed()
+    if settings.aimbotLockIsMouseButton then
+        local btn = settings.aimbotLockMouseButtonNum
+        if btn == 2 then
+            return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        elseif btn == 3 then
+            return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton3)
+        elseif btn == 4 or btn == 5 then
+            -- boutons latéraux souris: utilisation de GetMouseButtonsPressed (si disponible)
+            -- fallback: détection via InputBegan/InputEnded
+            return isAimbotLockHeld
+        end
+    elseif settings.aimbotLockKeyCode then
+        return UserInputService:IsKeyDown(settings.aimbotLockKeyCode)
+    end
+    return false
+end
+
+-- Connexion pour boutons latéraux souris (4/5)
+UserInputService.InputBegan:Connect(function(inp)
+    if settings.aimbotLock and settings.aimbotLockIsMouseButton then
+        local btn = settings.aimbotLockMouseButtonNum
+        if btn == 4 or btn == 5 then
+            -- Les boutons 4/5 apparaissent souvent comme MouseButton3 ou des touches spéciales
+            -- On les détecte par KeyCode si possible
+            if inp.UserInputType == Enum.UserInputType.MouseButton3 and btn == 3 then
+                isAimbotLockHeld = true
+            end
+        end
+    end
+end)
+UserInputService.InputEnded:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.MouseButton3 then
+        isAimbotLockHeld = false
+    end
+end)
+
+-- ============================================================
+-- ONGLET: WALLHACK / ESP
+-- ============================================================
+createSectionTitle("Wallhack", "ESP — Highlight Joueurs")
+
+local _, espRed = createToggle("Wallhack", "ESP Rouge", settings.redESP, function(v)
+    settings.redESP = v
+    if not v then for _, h in pairs(highlights) do h:Destroy() end; highlights = {} end
+end)
+
+local _, espRainbow = createToggle("Wallhack", "ESP Arc-en-ciel", settings.rainbowESP, function(v)
+    settings.rainbowESP = v
+end)
+
+createSlider("Wallhack", "Transparence ESP", 0, 10, settings.espTransparency * 10, "", function(v)
+    settings.espTransparency = v / 10
+    for _, h in pairs(highlights) do h.FillTransparency = settings.espTransparency end
+end)
+
+createColorPicker("Wallhack", "Couleur ESP", settings.espColor, function(c)
+    settings.espColor = c
+end)
+
+-- ============================================================
+-- ONGLET: AIMBOT
+-- ============================================================
+createSectionTitle("Aimbot", "Aimbot — Configuration")
+
+local _, aimbotTog = createToggle("Aimbot", "Aimbot Actif", settings.aimbot, function(v)
+    settings.aimbot = v
+    if not v then lockedTarget = nil end
+end)
+
+-- AIMBOT LOCK avec sélecteur de touche sur la même ligne
+local AimbotLockRow = Instance.new("Frame", Content)
+AimbotLockRow.Size = UDim2.new(1, 0, 0, 52); AimbotLockRow.BackgroundColor3 = panelSoft
+AimbotLockRow.BorderSizePixel = 0; AimbotLockRow.Visible = (currentTab == "Aimbot")
+Instance.new("UICorner", AimbotLockRow).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", AimbotLockRow).Color = Color3.fromRGB(50, 45, 60)
+table.insert(tabPages["Aimbot"], AimbotLockRow)
+
+-- Nom + toggle
+local ALLabel = Instance.new("TextLabel", AimbotLockRow)
+ALLabel.Size = UDim2.new(0, 120, 0, 22); ALLabel.Position = UDim2.new(0, 12, 0, 5)
+ALLabel.BackgroundTransparency = 1; ALLabel.Text = "Aimbot Lock"
+ALLabel.Font = Enum.Font.GothamBold; ALLabel.TextSize = 13
+ALLabel.TextColor3 = Color3.fromRGB(238, 236, 242); ALLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local ALToggle = Instance.new("TextButton", AimbotLockRow)
+ALToggle.Size = UDim2.new(0, 44, 0, 22); ALToggle.Position = UDim2.new(0, 136, 0, 5)
+ALToggle.BackgroundColor3 = settings.aimbotLock and currentTheme or Color3.fromRGB(45, 45, 55)
+ALToggle.Text = ""; ALToggle.AutoButtonColor = false
+Instance.new("UICorner", ALToggle).CornerRadius = UDim.new(1, 0)
+local ALCircle = Instance.new("Frame", ALToggle)
+ALCircle.Size = UDim2.new(0, 17, 0, 17)
+ALCircle.Position = settings.aimbotLock and UDim2.new(1, -19, 0.5, -8.5) or UDim2.new(0, 2, 0.5, -8.5)
+ALCircle.BackgroundColor3 = Color3.fromRGB(255, 255, 255); ALCircle.BorderSizePixel = 0
+Instance.new("UICorner", ALCircle).CornerRadius = UDim.new(1, 0)
+
+-- Séparateur vertical
+local ALSep = Instance.new("Frame", AimbotLockRow)
+ALSep.Size = UDim2.new(0, 1, 0, 30); ALSep.Position = UDim2.new(0, 192, 0.5, -15)
+ALSep.BackgroundColor3 = Color3.fromRGB(60, 55, 75); ALSep.BorderSizePixel = 0
+
+-- Label "Touche:"
+local ALKeyLabel = Instance.new("TextLabel", AimbotLockRow)
+ALKeyLabel.Size = UDim2.new(0, 55, 0, 22); ALKeyLabel.Position = UDim2.new(0, 200, 0, 5)
+ALKeyLabel.BackgroundTransparency = 1; ALKeyLabel.Text = "Touche :"
+ALKeyLabel.Font = Enum.Font.GothamBold; ALKeyLabel.TextSize = 11
+ALKeyLabel.TextColor3 = Color3.fromRGB(155, 150, 165); ALKeyLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Bouton sélection touche
+local ALKeyBtn = Instance.new("TextButton", AimbotLockRow)
+ALKeyBtn.Size = UDim2.new(0, 110, 0, 28); ALKeyBtn.Position = UDim2.new(0, 254, 0.5, -14)
+ALKeyBtn.BackgroundColor3 = Color3.fromRGB(34, 26, 43); ALKeyBtn.Text = settings.aimbotLockKey or "Clic D"
+ALKeyBtn.Font = Enum.Font.GothamBold; ALKeyBtn.TextSize = 11; ALKeyBtn.TextColor3 = currentTheme
+ALKeyBtn.AutoButtonColor = false; ALKeyBtn.BorderSizePixel = 0
+Instance.new("UICorner", ALKeyBtn).CornerRadius = UDim.new(0, 6)
+Instance.new("UIStroke", ALKeyBtn).Color = Color3.fromRGB(80, 60, 120)
+
+-- Dropdown touches pour aimbot lock
+local ALDropOpen = false
+local ALDropFrame = Instance.new("ScrollingFrame", ScreenGui)
+ALDropFrame.Size = UDim2.new(0, 130, 0, math.min(#AVAILABLE_KEYCODES * 26, 200))
+ALDropFrame.BackgroundColor3 = Color3.fromRGB(24, 20, 32); ALDropFrame.BorderSizePixel = 0
+ALDropFrame.ScrollBarThickness = 3; ALDropFrame.CanvasSize = UDim2.new(0, 0, 0, #AVAILABLE_KEYCODES * 26)
+ALDropFrame.Visible = false; ALDropFrame.ZIndex = 200
+Instance.new("UICorner", ALDropFrame).CornerRadius = UDim.new(0, 6)
+Instance.new("UIStroke", ALDropFrame).Color = currentTheme
+
+local ALDLayout = Instance.new("UIListLayout", ALDropFrame)
+ALDLayout.SortOrder = Enum.SortOrder.LayoutOrder
+for _, kopt in ipairs(AVAILABLE_KEYCODES) do
+    local OBtn2 = Instance.new("TextButton", ALDropFrame)
+    OBtn2.Size = UDim2.new(1, 0, 0, 26); OBtn2.BackgroundTransparency = 1
+    OBtn2.Text = kopt.label; OBtn2.Font = Enum.Font.GothamBold; OBtn2.TextSize = 11
+    OBtn2.TextColor3 = Color3.fromRGB(200, 195, 215); OBtn2.ZIndex = 201
+    OBtn2.MouseButton1Click:Connect(function()
+        settings.aimbotLockKey = kopt.label
+        if kopt.mouseButton then
+            settings.aimbotLockIsMouseButton = true
+            settings.aimbotLockMouseButtonNum = kopt.mouseButton
+            settings.aimbotLockKeyCode = nil
+        elseif type(kopt.code) == "userdata" and tostring(kopt.code):find("UserInputType") then
+            settings.aimbotLockIsMouseButton = true
+            settings.aimbotLockMouseButtonNum = kopt.code == Enum.UserInputType.MouseButton2 and 2 or 3
+            settings.aimbotLockKeyCode = nil
+        else
+            settings.aimbotLockIsMouseButton = false
+            settings.aimbotLockKeyCode = kopt.code
+            settings.aimbotLockMouseButtonNum = nil
+        end
+        ALKeyBtn.Text = kopt.label
+        ALDropFrame.Visible = false; ALDropOpen = false
+        saveSettings()
+    end)
+    OBtn2.MouseEnter:Connect(function() OBtn2.BackgroundTransparency = 0.6; OBtn2.BackgroundColor3 = currentTheme end)
+    OBtn2.MouseLeave:Connect(function() OBtn2.BackgroundTransparency = 1 end)
+end
+
+ALKeyBtn.MouseButton1Click:Connect(function()
+    ALDropOpen = not ALDropOpen
+    if ALDropOpen then
+        local absPos = ALKeyBtn.AbsolutePosition
+        local absSize = ALKeyBtn.AbsoluteSize
+        ALDropFrame.Position = UDim2.new(0, absPos.X, 0, absPos.Y + absSize.Y + 4)
+        ALDropFrame.Visible = true
+    else
+        ALDropFrame.Visible = false
+    end
+end)
+
+local alEnabled = settings.aimbotLock
+ALToggle.MouseButton1Click:Connect(function()
+    alEnabled = not alEnabled; settings.aimbotLock = alEnabled
+    TweenService:Create(ALToggle, TweenInfo.new(0.2), {BackgroundColor3 = alEnabled and currentTheme or Color3.fromRGB(45, 45, 55)}):Play()
+    TweenService:Create(ALCircle, TweenInfo.new(0.2), {Position = alEnabled and UDim2.new(1, -19, 0.5, -8.5) or UDim2.new(0, 2, 0.5, -8.5)}):Play()
+    if not alEnabled then lockedTarget = nil end; saveSettings()
+end)
+
+local _, autoShootTog = createToggle("Aimbot", "Auto Shoot", settings.autoShoot, function(v) settings.autoShoot = v end)
+local _, triggerTog   = createToggle("Aimbot", "TriggerBot", settings.triggerBot, function(v) settings.triggerBot = v end)
+local _, showFOVTog   = createToggle("Aimbot", "Afficher FOV", settings.showFOV, function(v) settings.showFOV = v end)
+
+createSectionTitle("Aimbot", "Paramètres Aimbot")
+createSlider("Aimbot", "Rayon FOV", 50, 800, settings.aimbotFOV, "px", function(v) settings.aimbotFOV = v end)
+createSlider("Aimbot", "Smoothing", 1, 20, settings.aimbotSmooth, "", function(v) settings.aimbotSmooth = v end)
+createDropdown("Aimbot", "Partie ciblée", {"Head","UpperTorso","LowerTorso","HumanoidRootPart"}, settings.targetPart, function(v)
+    settings.targetPart = v
+end)
+createColorPicker("Aimbot", "Couleur FOV Circle", settings.fovColor, function(c) settings.fovColor = c end)
+
+-- ============================================================
+-- ONGLET: MOVEMENT
+-- ============================================================
+createSectionTitle("Movement", "Déplacement")
+
+local _, noclipTog = createToggle("Movement", "Noclip", settings.noclip, function(v)
+    settings.noclip = v
+end)
+local _, infJumpTog = createToggle("Movement", "Infinite Jump", settings.infiniteJump, function(v)
+    settings.infiniteJump = v
+    if v then
+        local conn = UserInputService.JumpRequest:Connect(function()
+            if settings.infiniteJump and humanoid then humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end
+        end)
+        connections[#connections+1] = conn
+    end
+end)
+local _, speedTog = createToggle("Movement", "Speed Hack", settings.speedEnabled, function(v)
+    settings.speedEnabled = v
+    if humanoid then
+        humanoid.WalkSpeed = v and settings.walkSpeed or originalValues.walkSpeed
+    end
+end)
+createSlider("Movement", "Vitesse de marche", 1, 200, settings.walkSpeed, "", function(v)
+    settings.walkSpeed = v
+    if settings.speedEnabled and humanoid then humanoid.WalkSpeed = v end
+end)
+
+createSectionTitle("Movement", "Vol & Jump")
+local _, flyTog = createToggle("Movement", "Fly", settings.fly, function(v)
+    settings.fly = v
+    if not v then
+        if flyConnection then flyConnection:Disconnect(); flyConnection = nil end
+        if humanoid then humanoid.PlatformStand = false end
+    else
+        humanoid.PlatformStand = true
+        flyConnection = RunService.RenderStepped:Connect(function()
+            if not settings.fly then
+                flyConnection:Disconnect(); flyConnection = nil
+                humanoid.PlatformStand = false; return
+            end
+            local moveDir = Vector3.new(
+                (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0),
+                (UserInputService:IsKeyDown(Enum.KeyCode.Space) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) and 1 or 0),
+                (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0)
+            )
+            if moveDir.Magnitude > 0 then
+                rootpart.Velocity = camera.CFrame:VectorToWorldSpace(moveDir.Unit * settings.flySpeed)
+            else
+                rootpart.Velocity = Vector3.new(0, 0, 0)
+            end
+        end)
+    end
+end)
+createSlider("Movement", "Vitesse du vol", 5, 300, settings.flySpeed, "", function(v) settings.flySpeed = v end)
+createSlider("Movement", "Jump Power", 10, 400, settings.jumpPower, "", function(v)
+    settings.jumpPower = v
+    if humanoid then humanoid.JumpPower = v end
+end)
+
+createSectionTitle("Movement", "Spin")
+local _, spinTog = createToggle("Movement", "SpinBot", settings.spinbot, function(v) settings.spinbot = v end)
+createSlider("Movement", "Vitesse spin", 1, 50, settings.spinSpeed, "", function(v) settings.spinSpeed = v end)
+
+-- ============================================================
+-- ONGLET: VISUAL
+-- ============================================================
+createSectionTitle("Visual", "Visuels")
+local _, fullbrightTog = createToggle("Visual", "FullBright", settings.fullbright, function(v)
+    settings.fullbright = v
+    pcall(function()
+        local Lighting = game:GetService("Lighting")
+        Lighting.Brightness    = v and 2 or 1
+        Lighting.ClockTime     = v and 14 or Lighting.ClockTime
+        Lighting.FogEnd        = v and 100000 or Lighting.FogEnd
+        Lighting.GlobalShadows = not v
+    end)
+end)
+local _, noFogTog = createToggle("Visual", "No Fog", settings.noFog, function(v)
+    settings.noFog = v
+    pcall(function()
+        local Lighting = game:GetService("Lighting")
+        Lighting.FogEnd = v and 999999 or 1000
+    end)
+end)
+local _, fovTog = createToggle("Visual", "FOV Changer", settings.fovChanger, function(v)
+    settings.fovChanger = v
+    camera.FieldOfView = v and settings.fovValue or originalValues.fov
+end)
+createSlider("Visual", "Valeur FOV", 30, 120, settings.fovValue, "°", function(v)
+    settings.fovValue = v
+    if settings.fovChanger then camera.FieldOfView = v end
+end)
+local _, thirdTog = createToggle("Visual", "Third Person", settings.thirdPerson, function(v)
+    settings.thirdPerson = v
+    if v then camera.CameraType = Enum.CameraType.Follow; camera.FieldOfView = 90
+    else camera.CameraType = Enum.CameraType.Custom; camera.FieldOfView = originalValues.fov end
+end)
+
+-- ============================================================
+-- ONGLET: ACTIONS
+-- ============================================================
+createSectionTitle("Actions", "Actions Rapides")
+local function makeActionBtn(tabName, text, color, callback)
+    local A = Instance.new("TextButton", Content)
+    A.Size = UDim2.new(1, 0, 0, 40); A.BackgroundColor3 = color or Color3.fromRGB(60, 30, 100)
+    A.Text = text; A.Font = Enum.Font.GothamBold; A.TextSize = 13
+    A.TextColor3 = Color3.fromRGB(255, 255, 255); A.AutoButtonColor = false
+    A.BorderSizePixel = 0; A.Visible = (tabName == currentTab)
+    Instance.new("UICorner", A).CornerRadius = UDim.new(0, 8)
+    table.insert(tabPages[tabName], A)
+    A.MouseButton1Click:Connect(callback)
+    return A
+end
+
+makeActionBtn("Actions", "Respawn", Color3.fromRGB(50, 80, 180), function()
+    player:LoadCharacter()
+    notify("ZNK Hub", "Respawn effectué !", 2)
+end)
+makeActionBtn("Actions", "Rejoin", Color3.fromRGB(80, 50, 180), function()
+    local TeleportService = game:GetService("TeleportService")
+    TeleportService:Teleport(game.PlaceId, player)
+end)
+makeActionBtn("Actions", "Copier UserID", Color3.fromRGB(60, 60, 130), function()
+    pcall(function()
+        if setclipboard then setclipboard(tostring(player.UserId)) end
+    end)
+    notify("ZNK Hub", "UserID copié !", 2)
+end)
+makeActionBtn("Actions", "Anti-AFK (toggle)", Color3.fromRGB(40, 100, 60), function()
+    settings.antiAFK = not settings.antiAFK
+    notify("ZNK Hub", "Anti-AFK : "..(settings.antiAFK and "ON" or "OFF"), 2)
+end)
+makeActionBtn("Actions", "Clear Connexions", Color3.fromRGB(100, 40, 40), function()
+    for _, c in pairs(connections) do pcall(function() c:Disconnect() end) end
+    connections = {}
+    notify("ZNK Hub", "Connexions nettoyées.", 2)
+end)
+
+-- ============================================================
+-- ONGLET: OTHERS — Keybinds complets (fonctionne aussi réduit)
+-- ============================================================
+createSectionTitle("Others", "Touches Raccourcis")
+
+local function makeOthersKeybind(featureLabel, settingKeyBind, settingKey, toggleRecord)
+    -- Toggle activé/désactivé pour ce keybind
+    local BindRow = Instance.new("Frame", Content)
+    BindRow.Size = UDim2.new(1, 0, 0, 52); BindRow.BackgroundColor3 = panelSoft
+    BindRow.BorderSizePixel = 0; BindRow.Visible = (currentTab == "Others")
+    Instance.new("UICorner", BindRow).CornerRadius = UDim.new(0, 8)
+    Instance.new("UIStroke", BindRow).Color = Color3.fromRGB(50, 45, 60)
+    table.insert(tabPages["Others"], BindRow)
+
+    -- Nom
+    local BRLabel = Instance.new("TextLabel", BindRow)
+    BRLabel.Size = UDim2.new(0.35, 0, 0, 22); BRLabel.Position = UDim2.new(0, 10, 0, 4)
+    BRLabel.BackgroundTransparency = 1; BRLabel.Text = featureLabel
+    BRLabel.Font = Enum.Font.GothamBold; BRLabel.TextSize = 12
+    BRLabel.TextColor3 = Color3.fromRGB(238, 236, 242); BRLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    -- Toggle keybind actif/inactif
+    local BRTogBtn = Instance.new("TextButton", BindRow)
+    BRTogBtn.Size = UDim2.new(0, 40, 0, 20); BRTogBtn.Position = UDim2.new(0.35, 4, 0, 6)
+    BRTogBtn.BackgroundColor3 = settings[settingKeyBind] and currentTheme or Color3.fromRGB(45, 45, 55)
+    BRTogBtn.Text = ""; BRTogBtn.AutoButtonColor = false
+    Instance.new("UICorner", BRTogBtn).CornerRadius = UDim.new(1, 0)
+    local BRCircle = Instance.new("Frame", BRTogBtn)
+    BRCircle.Size = UDim2.new(0, 15, 0, 15)
+    BRCircle.Position = settings[settingKeyBind] and UDim2.new(1, -17, 0.5, -7.5) or UDim2.new(0, 2, 0.5, -7.5)
+    BRCircle.BackgroundColor3 = Color3.fromRGB(255, 255, 255); BRCircle.BorderSizePixel = 0
+    Instance.new("UICorner", BRCircle).CornerRadius = UDim.new(1, 0)
+
+    local bindEnabled = settings[settingKeyBind]
+    BRTogBtn.MouseButton1Click:Connect(function()
+        bindEnabled = not bindEnabled; settings[settingKeyBind] = bindEnabled
+        TweenService:Create(BRTogBtn, TweenInfo.new(0.2), {BackgroundColor3 = bindEnabled and currentTheme or Color3.fromRGB(45, 45, 55)}):Play()
+        TweenService:Create(BRCircle, TweenInfo.new(0.2), {Position = bindEnabled and UDim2.new(1, -17, 0.5, -7.5) or UDim2.new(0, 2, 0.5, -7.5)}):Play()
+        saveSettings()
+    end)
+
+    -- Label "Touche:"
+    local BRKeyLbl = Instance.new("TextLabel", BindRow)
+    BRKeyLbl.Size = UDim2.new(0, 50, 0, 20); BRKeyLbl.Position = UDim2.new(0.35, 52, 0, 6)
+    BRKeyLbl.BackgroundTransparency = 1; BRKeyLbl.Text = "Touche:"
+    BRKeyLbl.Font = Enum.Font.GothamBold; BRKeyLbl.TextSize = 10
+    BRKeyLbl.TextColor3 = Color3.fromRGB(155, 150, 165); BRKeyLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    -- Bouton touche
+    local currentKeyName = tostring(settings[settingKey]):gsub("Enum.KeyCode.", "")
+    local BRKeyBtn = Instance.new("TextButton", BindRow)
+    BRKeyBtn.Size = UDim2.new(0, 90, 0, 26); BRKeyBtn.Position = UDim2.new(1, -98, 0, 4)
+    BRKeyBtn.BackgroundColor3 = Color3.fromRGB(34, 26, 43); BRKeyBtn.Text = currentKeyName
+    BRKeyBtn.Font = Enum.Font.GothamBold; BRKeyBtn.TextSize = 10; BRKeyBtn.TextColor3 = currentTheme
+    BRKeyBtn.AutoButtonColor = false; BRKeyBtn.BorderSizePixel = 0
+    Instance.new("UICorner", BRKeyBtn).CornerRadius = UDim.new(0, 5)
+    Instance.new("UIStroke", BRKeyBtn).Color = Color3.fromRGB(80, 60, 120)
+
+    -- Label statut en bas
+    local BRStatus = Instance.new("TextLabel", BindRow)
+    BRStatus.Size = UDim2.new(1, -16, 0, 16); BRStatus.Position = UDim2.new(0, 8, 0, 30)
+    BRStatus.BackgroundTransparency = 1; BRStatus.Text = bindEnabled and ("Actif · " .. currentKeyName) or "Inactif"
+    BRStatus.Font = Enum.Font.Gotham; BRStatus.TextSize = 9
+    BRStatus.TextColor3 = Color3.fromRGB(120, 110, 140); BRStatus.TextXAlignment = Enum.TextXAlignment.Left
+
+    local listening = false
+    BRKeyBtn.MouseButton1Click:Connect(function()
+        if listening then return end
+        listening = true; BRKeyBtn.Text = "..."; BRKeyBtn.BackgroundColor3 = Color3.fromRGB(60, 40, 80)
+        local conn; conn = UserInputService.InputBegan:Connect(function(inp, gp)
+            if gp then return end
+            if inp.KeyCode ~= Enum.KeyCode.Unknown then
+                local kname = tostring(inp.KeyCode):gsub("Enum.KeyCode.", "")
+                settings[settingKey] = inp.KeyCode; BRKeyBtn.Text = kname
+                BRKeyBtn.BackgroundColor3 = Color3.fromRGB(34, 26, 43)
+                BRStatus.Text = bindEnabled and ("Actif · " .. kname) or "Inactif"
+            end
+            listening = false; conn:Disconnect(); saveSettings()
+        end)
+    end)
+
+    -- Mise à jour statut si toggle change
+    BRTogBtn.MouseButton1Click:Connect(function()
+        local kname = tostring(settings[settingKey]):gsub("Enum.KeyCode.", "")
+        BRStatus.Text = settings[settingKeyBind] and ("Actif · " .. kname) or "Inactif"
+    end)
+
+    return BindRow
+end
+
+makeOthersKeybind("ESP",          "bindESP",        "bindESPKey",       nil)
+makeOthersKeybind("Aimbot",       "bindAimbot",     "bindAimbotKey",    nil)
+makeOthersKeybind("Speed",        "bindSpeed",      "bindSpeedKey",     nil)
+makeOthersKeybind("Fly",          "bindFly",        "bindFlyKey",       nil)
+makeOthersKeybind("Noclip",       "bindNoclip",     "bindNoclipKey",    nil)
+makeOthersKeybind("Inf. Jump",    "bindInfJump",    "bindInfJumpKey",   nil)
+makeOthersKeybind("SpinBot",      "bindSpinbot",    "bindSpinbotKey",   nil)
+makeOthersKeybind("FullBright",   "bindFullbright", "bindFullbrightKey",nil)
+makeOthersKeybind("No Fog",       "bindNoFog",      "bindNoFogKey",     nil)
+makeOthersKeybind("Third Person", "bindThirdPerson","bindThirdPersonKey",nil)
+makeOthersKeybind("Anti-AFK",     "bindAntiAFK",    "bindAntiAFKKey",   nil)
+
+createSectionTitle("Others", "Touche Minimize")
+local MKRow, MKBtn = createKeybindRow("Others", "Others", "Minimize Hub :", settings.minimizeKey, function(kc, kname)
+    settings.minimizeKey    = kname
+    settings.minimizeKeyCode = kc
+end)
+
+-- ============================================================
+-- RUNTIME LOOPS
+-- ============================================================
+
+-- ESP Loop
+local espUpdateConn = RunService.Heartbeat:Connect(function()
+    if not (settings.redESP or settings.rainbowESP) then
+        for _, h in pairs(highlights) do h:Destroy() end; highlights = {}; return
+    end
+    rainbowHue = (rainbowHue + 0.005) % 1
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= player and plr.Character then
+            if not highlights[plr.Name] then
+                local h = Instance.new("SelectionBox")
+                h.SurfaceTransparency = settings.espTransparency
+                h.LineThickness = 0.06
+                h.Adornee = plr.Character
+                h.Parent = Workspace
+                highlights[plr.Name] = h
+            end
+            local h = highlights[plr.Name]
+            if settings.rainbowESP then
+                h.Color3 = Color3.fromHSV(rainbowHue, 1, 1)
+            else
+                h.Color3 = settings.espColor
+            end
+        end
+    end
+    -- Nettoyer les joueurs partis
+    for name, h in pairs(highlights) do
+        if not Players:FindFirstChild(name) then h:Destroy(); highlights[name] = nil end
+    end
+end)
+connections[#connections+1] = espUpdateConn
+
+-- Aimbot Loop
+local aimbotConn = RunService.RenderStepped:Connect(function()
+    if not settings.aimbot then return end
+    local lockActive = isAimbotLockPressed()
+    if settings.aimbotLock and not lockActive then lockedTarget = nil; return end
+
+    local bestTarget = nil; local bestDist = settings.aimbotFOV
+    local screenCenter = Vector2.new(camera.ViewportSize.X/2, camera.ViewportSize.Y/2)
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= player and plr.Character then
+            local part = plr.Character:FindFirstChild(settings.targetPart)
+            if part then
+                local sp, onScreen = camera:WorldToScreenPoint(part.Position)
+                if onScreen then
+                    local dist = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
+                    if dist < bestDist then bestDist = dist; bestTarget = part end
+                end
+            end
+        end
+    end
+    if bestTarget then
+        if settings.aimbotLock then lockedTarget = bestTarget end
+        local targetPos = lockedTarget and lockedTarget.Position or bestTarget.Position
+        local newCF = CFrame.new(camera.CFrame.Position, targetPos)
+        camera.CFrame = camera.CFrame:Lerp(newCF, 1/settings.aimbotSmooth)
+    end
+end)
+connections[#connections+1] = aimbotConn
+
+-- FOV Circle
+pcall(function()
+    fovCircle = Drawing.new("Circle")
+    fovCircle.Visible  = false
+    fovCircle.Color    = settings.fovColor
+    fovCircle.Radius   = settings.aimbotFOV
+    fovCircle.Thickness= 1.5
+    fovCircle.Filled   = false
+    RunService.RenderStepped:Connect(function()
+        if fovCircle then
+            fovCircle.Position = Vector2.new(camera.ViewportSize.X/2, camera.ViewportSize.Y/2)
+            fovCircle.Visible  = settings.showFOV and settings.aimbot
+            fovCircle.Radius   = settings.aimbotFOV
+            fovCircle.Color    = settings.fovColor
+        end
+    end)
+end)
+
+-- Noclip Loop
+RunService.Stepped:Connect(function()
+    if settings.noclip and character then
+        for _, part in pairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then part.CanCollide = false end
+        end
+    end
+end)
+
+-- SpinBot Loop
+RunService.RenderStepped:Connect(function()
+    if settings.spinbot and rootpart then
+        spinAngle = spinAngle + settings.spinSpeed
+        rootpart.CFrame = CFrame.new(rootpart.Position) * CFrame.Angles(0, math.rad(spinAngle), 0)
+    end
+end)
+
+-- Anti-AFK Loop
+task.spawn(function()
+    while true do
+        task.wait(60)
+        if settings.antiAFK then
+            pcall(function()
+                local VirtualUser = game:GetService("VirtualUser")
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.new())
+            end)
+        end
+    end
+end)
+
+-- Timer Watcher
+startTimerWatcher()
+
+-- Timer Display Update
+task.spawn(function()
+    while loginVerified do
+        task.wait(30)
+        updateRemainingTimeDisplay()
+        TimerLbl.Text = currentKeyRemaining ~= "" and currentKeyRemaining or "Illimitée"
+        UsernameLbl.Text = "👤 "..loggedUsername.." · "..currentKeyRemaining
+    end
+end)
+
+-- KEYBIND HANDLER GLOBAL (keybinds Others + minimize, fonctionne même réduit)
+UserInputService.InputBegan:Connect(function(inp, gp)
+    if gp then return end
+    -- Minimize
+    if settings.minimizeKeyCode and inp.KeyCode == settings.minimizeKeyCode then
+        toggleMinimize(); return
+    end
+    -- Others keybinds
+    local kc = inp.KeyCode
+    if settings.bindESP and kc == settings.bindESPKey then
+        settings.redESP = not settings.redESP
+        if not settings.redESP then for _, h in pairs(highlights) do h:Destroy() end; highlights = {} end
+        notify("ZNK", "ESP "..(settings.redESP and "ON" or "OFF"), 1)
+    end
+    if settings.bindAimbot and kc == settings.bindAimbotKey then
+        settings.aimbot = not settings.aimbot
+        if not settings.aimbot then lockedTarget = nil end
+        notify("ZNK", "Aimbot "..(settings.aimbot and "ON" or "OFF"), 1)
+    end
+    if settings.bindSpeed and kc == settings.bindSpeedKey then
+        settings.speedEnabled = not settings.speedEnabled
+        if humanoid then humanoid.WalkSpeed = settings.speedEnabled and settings.walkSpeed or originalValues.walkSpeed end
+        notify("ZNK", "Speed "..(settings.speedEnabled and "ON" or "OFF"), 1)
+    end
+    if settings.bindFly and kc == settings.bindFlyKey then
+        settings.fly = not settings.fly
+        notify("ZNK", "Fly "..(settings.fly and "ON" or "OFF"), 1)
+    end
+    if settings.bindNoclip and kc == settings.bindNoclipKey then
+        settings.noclip = not settings.noclip
+        notify("ZNK", "Noclip "..(settings.noclip and "ON" or "OFF"), 1)
+    end
+    if settings.bindInfJump and kc == settings.bindInfJumpKey then
+        settings.infiniteJump = not settings.infiniteJump
+        notify("ZNK", "Inf. Jump "..(settings.infiniteJump and "ON" or "OFF"), 1)
+    end
+    if settings.bindSpinbot and kc == settings.bindSpinbotKey then
+        settings.spinbot = not settings.spinbot
+        notify("ZNK", "SpinBot "..(settings.spinbot and "ON" or "OFF"), 1)
+    end
+    if settings.bindFullbright and kc == settings.bindFullbrightKey then
+        settings.fullbright = not settings.fullbright
+        notify("ZNK", "FullBright "..(settings.fullbright and "ON" or "OFF"), 1)
+    end
+    if settings.bindNoFog and kc == settings.bindNoFogKey then
+        settings.noFog = not settings.noFog
+        notify("ZNK", "No Fog "..(settings.noFog and "ON" or "OFF"), 1)
+    end
+    if settings.bindThirdPerson and kc == settings.bindThirdPersonKey then
+        settings.thirdPerson = not settings.thirdPerson
+        camera.CameraType = settings.thirdPerson and Enum.CameraType.Follow or Enum.CameraType.Custom
+        notify("ZNK", "Third Person "..(settings.thirdPerson and "ON" or "OFF"), 1)
+    end
+    if settings.bindAntiAFK and kc == settings.bindAntiAFKKey then
+        settings.antiAFK = not settings.antiAFK
+        notify("ZNK", "Anti-AFK "..(settings.antiAFK and "ON" or "OFF"), 1)
+    end
+end)
+
+-- Character respawn
+player.CharacterAdded:Connect(function(char)
+    character = char
+    humanoid = char:WaitForChild("Humanoid")
+    rootpart = char:WaitForChild("HumanoidRootPart")
+    originalValues.walkSpeed = humanoid.WalkSpeed
+    originalValues.jumpPower = humanoid.JumpPower
+    if settings.speedEnabled then humanoid.WalkSpeed = settings.walkSpeed end
+    if settings.jumpPower then humanoid.JumpPower = settings.jumpPower end
+end)
+
+-- ============================================================
+-- SAUVEGARDE AU DÉMARRAGE
+-- ============================================================
+if isfile and isfile(SETTINGS_FILE) then
+    showStartupSavePrompt(
+        function()
+            loadSettings()
+            notify("ZNK Hub", "Configuration chargée !", 2)
+        end,
+        function()
+            notify("ZNK Hub", "Démarrage propre.", 2)
+        end
+    )
+end
+
+notify("ZNK Hub", "Hub chargé · "..loggedUsername, 3)
